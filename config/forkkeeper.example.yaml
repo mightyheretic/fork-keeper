@@ -49,6 +49,15 @@ watcher:
   # fine-grained PAT with read access to public repos is the simplest choice.
   # auth: personal
 
+# Merge engine: merges each new release into repos[].fork on a staging
+# branch and opens a PR into the stable branch.
+merge:
+  auto_merge: true        # merge PRs with an "auto" policy once CI passes
+  require_ci: true        # ...and only after at least one check has reported
+  check_interval: 5m      # how often open sync PRs are checked
+  committer_name: Fork Keeper
+  committer_email: forkkeeper@localhost
+
 notifications:
   ntfy:
     url: https://ntfy.sh/your-topic
@@ -90,13 +99,16 @@ license:
 
 repos:
   - upstream: upstream-org/some-app
-    fork: your-user/some-app        # optional until the merge engine lands
+    fork: your-user/some-app        # optional; without it the upstream is only watched
     watch: releases                 # releases | tags (for projects that only tag)
     groups: [apps]                  # optional, for group-scoped license rules
     # include_prereleases: true     # overrides watcher.include_prereleases
-    stable_branch: main
+    stable_branch: main             # default: the fork's default branch
     staging_branch: forkkeeper/staging
-    merge_strategy: merge   # merge | rebase | patch-stack
+    # merge: full-history merge, re-applying local patches if it conflicts (default)
+    # patch-stack: always re-apply local patches on top of upstream (alias: rebase)
+    # merge-only: merge, and report conflicts without trying the patch stack
+    merge_strategy: merge
     archive:
       mirrors: []
       software_heritage: true

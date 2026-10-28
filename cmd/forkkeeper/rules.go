@@ -82,7 +82,7 @@ func writeDecision(w io.Writer, diff *license.Diff, d rules.Decision) {
 	}
 }
 
-// statusCmd shows frozen repos and recent decisions.
+// statusCmd shows frozen repos, recent decisions and recent fork syncs.
 //
 //	forkkeeper status [owner/repo]
 func statusCmd(args []string) int {
@@ -130,16 +130,37 @@ func statusCmd(args []string) int {
 	fmt.Fprintln(os.Stdout)
 	if len(decisions) == 0 {
 		fmt.Fprintln(os.Stdout, "No license decisions yet.")
+	} else {
+		fmt.Fprintln(tw, "WHEN\tREPO\tVERSION\tRULE\tMERGE POLICY\tPENDING ACTIONS")
+		for _, d := range decisions {
+			version := d.Ref
+			if d.PreviousRef != "" {
+				version = d.PreviousRef + " -> " + d.Ref
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", d.CreatedAt.Local().Format(time.DateTime), d.Repo, version,
+				orDash(d.Rule), d.MergePolicy, orDash(strings.Join(d.Pending, ", ")))
+		}
+		tw.Flush()
+	}
+
+	syncs, err := db.Syncs(ctx, repo, 20)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Fprintln(os.Stdout)
+	if len(syncs) == 0 {
+		fmt.Fprintln(os.Stdout, "No fork syncs yet.")
 		return 0
 	}
-	fmt.Fprintln(tw, "WHEN\tREPO\tVERSION\tRULE\tMERGE POLICY\tPENDING ACTIONS")
-	for _, d := range decisions {
-		version := d.Ref
-		if d.PreviousRef != "" {
-			version = d.PreviousRef + " -> " + d.Ref
+	fmt.Fprintln(tw, "UPDATED\tFORK\tVERSION\tSTATUS\tSTRATEGY\tPR\tDETAIL")
+	for _, s := range syncs {
+		pr := "-"
+		if s.PRNumber > 0 {
+			pr = fmt.Sprintf("#%d", s.PRNumber)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", d.CreatedAt.Local().Format(time.DateTime), d.Repo, version,
-			orDash(d.Rule), d.MergePolicy, orDash(strings.Join(d.Pending, ", ")))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.UpdatedAt.Local().Format(time.DateTime), s.Fork, s.Ref,
+			s.Status, orDash(s.Strategy), pr, orDash(s.Detail))
 	}
 	tw.Flush()
 	return 0

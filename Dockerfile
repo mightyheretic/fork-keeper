@@ -17,12 +17,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -o /out/forkkeeper ./cmd/forkkeeper
 
 # ---- runtime ----
-# Distroless static: no shell or package manager, and runs as uid 65532 by default.
-FROM gcr.io/distroless/static-debian12:nonroot
+# Alpine with git: the merge engine needs the git binary (merge-tree, git >= 2.38).
+# Git only ever runs with hooks, filters and non-HTTPS transports disabled, and
+# upstream files are never checked out (see internal/git).
+FROM alpine:3.22
+RUN apk add --no-cache git ca-certificates tzdata \
+ && addgroup -S -g 65532 nonroot \
+ && adduser -S -D -H -u 65532 -G nonroot -h /var/lib/forkkeeper nonroot
 
 COPY --from=build /out/forkkeeper /usr/local/bin/forkkeeper
 
-# State (SQLite DB, git working copies) lives on a volume; config is mounted read-only.
+# State (SQLite DB, bare git caches of each fork) lives on a volume; config is mounted read-only.
 VOLUME ["/var/lib/forkkeeper"]
 ENV FORKKEEPER_DATA_DIR=/var/lib/forkkeeper \
     FORKKEEPER_CONFIG=/etc/forkkeeper/config.yaml \

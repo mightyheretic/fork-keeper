@@ -52,6 +52,7 @@ Keep a stable, maintained fork of each open-source app you depend on. When upstr
 - Fallback when conflicts are heavy: rebase, or a cherry-picked patch stack.
 - Local patches are kept as a separate, labeled layer so they can be re-applied or reviewed independently.
 - All merges happen on a staging branch. CI runs there. The result is opened as a PR, never pushed directly to the stable branch.
+- V1 implementation: merges run with `git merge-tree` in a bare cache, so upstream files are never checked out on the host. The patch-stack fallback re-applies the fork's own commits (those not in upstream, minus patch-equivalent ones) onto the tag. The result is recorded as a merge commit of stable and upstream, so the PR still merges cleanly and keeps history. The layer is pushed to `<staging>-patches`. One PR per fork is reused across releases. `auto` PRs are merged by Fork Keeper once CI passes; approval and blocked policies open drafts with sticky labels.
 
 ### 4.3 License Transition Rules (merged tripwire and policy)
 
@@ -203,7 +204,7 @@ Fork Keeper combines fork syncing, license-aware policy and archival in one self
 3. Per-file license change detection: how deep, and how to avoid noise.
 4. V2 UI exposure: public with strong auth, or VPN-only?
 5. State store: SQLite or Postgres?
-6. Where CI sandbox runs (container vs systemd-nspawn) and how results are reported back.
+6. Where CI sandbox runs (container vs systemd-nspawn) and how results are reported back. (V1: CI is the fork's own CI, e.g. GitHub Actions on the staging PR. Fork Keeper reads check runs and commit statuses and never runs upstream code itself.)
 7. Poll interval (default 15 minutes; anonymous access limits this to a handful of repos).
 
 ## 10. Suggested V1 Milestones

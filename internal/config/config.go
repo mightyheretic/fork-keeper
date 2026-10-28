@@ -28,6 +28,7 @@ type Config struct {
 	Watcher     Watcher     `yaml:"watcher"`
 	Repos       []Repo      `yaml:"repos"`
 	License     License     `yaml:"license"`
+	Merge       Merge       `yaml:"merge"`
 
 	// Sections owned by later milestones. Kept as raw YAML so the strict
 	// decoder still catches typos in the sections above.
@@ -57,7 +58,8 @@ const Anonymous = "anonymous"
 
 // Repo is one fork Fork Keeper maintains.
 type Repo struct {
-	// Fork is your fork ("owner/name"). Optional until the merge engine.
+	// Fork is your fork ("owner/name"). Without one, the upstream is only
+	// watched and license-checked.
 	Fork string `yaml:"fork"`
 	// Upstream is the repo being followed ("owner/name").
 	Upstream string `yaml:"upstream"`
@@ -68,12 +70,52 @@ type Repo struct {
 	// Groups name sets of repos that license rules can target.
 	Groups []string `yaml:"groups"`
 
+	// StableBranch is the fork branch PRs target. Default: the fork's
+	// default branch.
+	StableBranch string `yaml:"stable_branch"`
+	// StagingBranch is where upstream is merged before the PR. Fork Keeper
+	// owns it and force-pushes it. Default forkkeeper/staging.
+	StagingBranch string `yaml:"staging_branch"`
+	// MergeStrategy is merge (default), patch-stack or merge-only.
+	MergeStrategy string `yaml:"merge_strategy"`
+
 	// Used by later milestones.
-	StableBranch  string    `yaml:"stable_branch"`
-	StagingBranch string    `yaml:"staging_branch"`
-	MergeStrategy string    `yaml:"merge_strategy"`
-	Archive       yaml.Node `yaml:"archive"`
+	Archive yaml.Node `yaml:"archive"`
 }
+
+// Merge strategies.
+const (
+	// StrategyMerge merges upstream with history; on conflicts it falls
+	// back to re-applying the fork's patches on top of upstream.
+	StrategyMerge = "merge"
+	// StrategyPatchStack always re-applies the fork's patches on upstream.
+	StrategyPatchStack = "patch-stack"
+	// StrategyMergeOnly merges, and reports conflicts without a fallback.
+	StrategyMergeOnly = "merge-only"
+)
+
+// DefaultStagingBranch is the staging branch when a repo doesn't set one.
+const DefaultStagingBranch = "forkkeeper/staging"
+
+// Merge configures the merge engine.
+type Merge struct {
+	// AutoMerge merges PRs whose merge policy is "auto" once CI passes.
+	// Default true.
+	AutoMerge *bool `yaml:"auto_merge"`
+	// RequireCI holds auto-merge until at least one check has run. Default true.
+	RequireCI *bool `yaml:"require_ci"`
+	// CheckInterval is how often open sync PRs are checked. Default 5m.
+	CheckInterval time.Duration `yaml:"check_interval"`
+	// CommitterName and CommitterEmail sign merge and re-applied commits.
+	CommitterName  string `yaml:"committer_name"`
+	CommitterEmail string `yaml:"committer_email"`
+}
+
+// AutoMergeEnabled reports whether merge.auto_merge is on.
+func (m Merge) AutoMergeEnabled() bool { return m.AutoMerge == nil || *m.AutoMerge }
+
+// CIRequired reports whether merge.require_ci is on.
+func (m Merge) CIRequired() bool { return m.RequireCI == nil || *m.RequireCI }
 
 // WantsPrereleases reports whether pre-releases of r should be queued.
 func (c *Config) WantsPrereleases(r Repo) bool {
@@ -212,11 +254,30 @@ func (c *Config) applyDefaults() {
 		c.Watcher.PollInterval = 15 * time.Minute
 	}
 	for i := range c.Repos {
-		if c.Repos[i].Watch == "" {
-			c.Repos[i].Watch = WatchReleases
+		r := &c.Repos[i]
+		if r.Watch == "" {
+			r.Watch = WatchReleases
+		}
+		if r.StagingBranch == "" {
+			r.StagingBranch = DefaultStagingBranch
+		}
+		switch r.MergeStrategy {
+		case "":
+			r.MergeStrategy = StrategyMerge
+		case "rebase":
+			r.MergeStrategy = StrategyPatchStack
 		}
 	}
 	c.licenseDefaults()
+	if c.Merge.CheckInterval == 0 {
+		c.Merge.CheckInterval = 5 * time.Minute
+	}
+	if c.Merge.CommitterName == "" {
+		c.Merge.CommitterName = "Fork Keeper"
+	}
+	if c.Merge.CommitterEmail == "" {
+		c.Merge.CommitterEmail = "forkkeeper@localhost"
+	}
 	if c.GitHub.APIURL == "" {
 		c.GitHub.APIURL = "https://api.github.com"
 	}
@@ -298,7 +359,7 @@ func (c *Config) validate() error {
 			add("watcher.auth: unknown auth profile %q", a)
 		}
 	}
-	seen := map[string]bool{}
+	seen, forks := map[string]bool{}, map[string]bool{}
 	for i, r := range c.Repos {
 		p := fmt.Sprintf("repos[%d]", i)
 		if !validRepoName(r.Upstream) {
@@ -309,13 +370,35 @@ func (c *Config) validate() error {
 		seen[strings.ToLower(r.Upstream)] = true
 		if r.Fork != "" && !validRepoName(r.Fork) {
 			add("%s.fork: %q is not owner/name", p, r.Fork)
+		} else if r.Fork != "" && forks[strings.ToLower(r.Fork)] {
+			add("%s.fork: %s is listed twice", p, r.Fork)
 		}
+		forks[strings.ToLower(r.Fork)] = true
 		if r.Watch != WatchReleases && r.Watch != WatchTags {
 			add("%s.watch: unknown mode %q (want releases or tags)", p, r.Watch)
+		}
+		switch r.MergeStrategy {
+		case StrategyMerge, StrategyPatchStack, StrategyMergeOnly:
+		default:
+			add("%s.merge_strategy: unknown strategy %q (want merge, patch-stack or merge-only)", p, r.MergeStrategy)
+		}
+		for field, b := range map[string]string{"stable_branch": r.StableBranch, "staging_branch": r.StagingBranch} {
+			if b != "" && !validBranch(b) {
+				add("%s.%s: %q is not a valid branch name", p, field, b)
+			}
+		}
+		if r.StableBranch != "" && r.StableBranch == r.StagingBranch {
+			add("%s: staging_branch must differ from stable_branch", p)
 		}
 	}
 
 	c.validateLicense(add)
+	if c.Merge.CheckInterval < 30*time.Second {
+		add("merge.check_interval: must be at least 30s")
+	}
+	if strings.ContainsAny(c.Merge.CommitterName+c.Merge.CommitterEmail, "<>\n") {
+		add("merge: committer_name and committer_email must not contain <, > or newlines")
+	}
 
 	return errors.Join(errs...)
 }
@@ -334,9 +417,27 @@ var repoName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 func validRepoName(s string) bool { return repoName.MatchString(s) }
 
+var branchName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_./-]*$`)
+
+// validBranch is a conservative subset of git's ref name rules.
+func validBranch(s string) bool {
+	return branchName.MatchString(s) && !strings.Contains(s, "..") && !strings.Contains(s, "//") &&
+		!strings.HasSuffix(s, "/") && !strings.HasSuffix(s, ".") && !strings.HasSuffix(s, ".lock")
+}
+
 var repoPattern = regexp.MustCompile(`^(\*|[A-Za-z0-9_.-]+/(\*|[A-Za-z0-9_.-]+))$`)
 
 func validRepoPattern(p string) bool { return repoPattern.MatchString(p) }
+
+// IsFork reports whether fullName is one of the configured forks.
+func (c *Config) IsFork(fullName string) bool {
+	for _, r := range c.Repos {
+		if r.Fork != "" && strings.EqualFold(r.Fork, fullName) {
+			return true
+		}
+	}
+	return false
+}
 
 // AuthProfileFor returns the auth profile name for a repo ("owner/name").
 // Exact matches beat "owner/*", which beats "*". It returns "" when nothing
