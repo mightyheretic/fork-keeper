@@ -1,0 +1,190 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"os/user"
+	"strings"
+	"syscall"
+	"text/tabwriter"
+	"time"
+
+	"github.com/mightyheretic/fork-keeper/internal/license"
+	"github.com/mightyheretic/fork-keeper/internal/provider"
+	"github.com/mightyheretic/fork-keeper/internal/provider/github"
+	"github.com/mightyheretic/fork-keeper/internal/rules"
+	"github.com/mightyheretic/fork-keeper/internal/store"
+)
+
+const rulesUsage = `usage:
+  forkkeeper rules test <owner/repo> <old-ref> <new-ref>
+
+Downloads both versions, diffs their licenses and shows which rule would
+fire and what it would do. Nothing is recorded or frozen.`
+
+// rulesCmd dry-runs the rule engine against two real versions.
+func rulesCmd(args []string) int {
+	if len(args) != 4 || args[0] != "test" {
+		fmt.Fprintln(os.Stderr, rulesUsage)
+		return 2
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid config:", err)
+		return 1
+	}
+	if _, err := provider.ParseRepo(args[1]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	sc := &cliScanner{archives: github.NewArchives(cfg.GitHub.APIURL,
+		upstreamToken(cfg, newGitHubAuth(cfg, newCredentials(cfg.Credentials))))}
+	oldR, err := sc.scan(ctx, args[1]+"@"+args[2])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	newR, err := sc.scan(ctx, args[1]+"@"+args[3])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	diff := license.Compare(args[2], oldR, args[3], newR)
+	if _, ok := cfg.RepoFor(args[1]); !ok {
+		fmt.Fprintf(os.Stderr, "note: %s is not in repos:, so only global rules apply\n", args[1])
+	}
+	writeDecision(os.Stdout, diff, rules.New(cfg).Evaluate(args[1], diff))
+	return 0
+}
+
+func writeDecision(w io.Writer, diff *license.Diff, d rules.Decision) {
+	fmt.Fprintln(w, diff.Summary())
+	fmt.Fprintln(w)
+	if d.Rule == "" {
+		fmt.Fprintf(w, "Decision: no action (%s); merge policy %s\n", d.Reason, d.MergePolicy)
+		return
+	}
+	fmt.Fprintf(w, "Rule:         %s (%s scope)\n", d.Rule, d.Scope)
+	fmt.Fprintf(w, "Actions:      %s\n", strings.Join(d.Actions, ", "))
+	fmt.Fprintf(w, "Merge policy: %s\n", d.MergePolicy)
+	fmt.Fprintf(w, "Reason:       %s\n", d.Reason)
+	if len(d.Matched) > 1 {
+		fmt.Fprintf(w, "Also matched: %s (lower precedence)\n", strings.Join(d.Matched[1:], ", "))
+	}
+}
+
+// statusCmd shows frozen repos and recent decisions.
+//
+//	forkkeeper status [owner/repo]
+func statusCmd(args []string) int {
+	repo := ""
+	if len(args) > 0 {
+		repo = args[0]
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid config:", err)
+		return 1
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, cfg.Database.Path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer db.Close()
+
+	frozen, err := db.FrozenRepos(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if len(frozen) == 0 {
+		fmt.Fprintln(os.Stdout, "No frozen repos.")
+	} else {
+		fmt.Fprintln(tw, "FROZEN REPO\tAT\tSINCE\tREASON")
+		for _, st := range frozen {
+			if repo != "" && !strings.EqualFold(st.Repo, repo) {
+				continue
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", st.Repo, orDash(st.FrozenRef), st.FrozenAt.Local().Format(time.DateTime), st.FrozenReason)
+		}
+		tw.Flush()
+	}
+
+	decisions, err := db.Decisions(ctx, repo, 20)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Fprintln(os.Stdout)
+	if len(decisions) == 0 {
+		fmt.Fprintln(os.Stdout, "No license decisions yet.")
+		return 0
+	}
+	fmt.Fprintln(tw, "WHEN\tREPO\tVERSION\tRULE\tMERGE POLICY\tPENDING ACTIONS")
+	for _, d := range decisions {
+		version := d.Ref
+		if d.PreviousRef != "" {
+			version = d.PreviousRef + " -> " + d.Ref
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", d.CreatedAt.Local().Format(time.DateTime), d.Repo, version,
+			orDash(d.Rule), d.MergePolicy, orDash(strings.Join(d.Pending, ", ")))
+	}
+	tw.Flush()
+	return 0
+}
+
+// unfreezeCmd lifts a freeze. A reason is required and recorded.
+//
+//	forkkeeper unfreeze --reason "upstream reverted the license" owner/repo
+func unfreezeCmd(args []string) int {
+	fs := flag.NewFlagSet("unfreeze", flag.ContinueOnError)
+	reason := fs.String("reason", "", "why the freeze is being lifted (required, recorded)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 || strings.TrimSpace(*reason) == "" {
+		fmt.Fprintln(os.Stderr, `usage: forkkeeper unfreeze --reason "why" <owner/repo>`)
+		return 2
+	}
+	repo := fs.Arg(0)
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid config:", err)
+		return 1
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, cfg.Database.Path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer db.Close()
+
+	actor := "cli"
+	if u, err := user.Current(); err == nil {
+		actor = "cli:" + u.Username
+	}
+	ok, err := db.Unfreeze(ctx, github.Name, repo, actor, *reason)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if !ok {
+		fmt.Fprintf(os.Stderr, "%s is not frozen\n", repo)
+		return 1
+	}
+	fmt.Printf("%s unfrozen; the next upstream release will be checked and synced normally.\n", repo)
+	return 0
+}

@@ -8,12 +8,14 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1–4 done.
+**Status:** V1 milestones 1–5 done.
 - **Watching:** the service polls upstream repos for new releases (or tags) and receives verified GitHub webhooks. Each new release is queued once in SQLite.
-- **License checks:** for each new release, it compares the licenses against the previous stable version and records what changed.
+- **License checks:** for each new release, it compares the licenses against the previous stable version.
+- **Rules:** your license rules decide what happens. A repo can be frozen at its last good version, and each version gets a merge policy for the merge engine.
 - **GitHub access:** it authenticates as a GitHub App or with a fine-grained PAT, using pluggable credential backends.
 
-Changes are only logged for now. The rule engine and merge engine land in later milestones.
+Merging, archiving and notifications land in later milestones. Until then those actions are
+recorded as pending.
 
 ## Upstream polling
 
@@ -74,6 +76,50 @@ forkkeeper license diff hashicorp/terraform v1.5.5 v1.6.0
 `diff` exits with code 3 when licenses changed. Verified against real relicenses: Terraform
 (MPL-2.0 → BUSL-1.1), Redis (BSD-3-Clause → RSALv2/SSPL, then + AGPL-3.0) and Elasticsearch
 (Apache-2.0 → Elastic-2.0/SSPL).
+
+## License rules
+
+Rules live under `license:` in the config (see `config/forkkeeper.example.yaml`). Each one maps a
+transition to actions:
+
+```yaml
+license:
+  allowlist: [MIT, Apache-2.0, BSD-3-Clause]
+  default_actions: [require_approval, notify]   # licenses changed, but no rule matched
+  rules:
+    - name: relicense-to-source-available
+      from: [MIT, Apache-2.0]          # licenses in the previous version (default: any)
+      to: [BUSL-1.1, SSPL-1.0, FSL-*]  # licenses added in the new version
+      actions: [freeze, archive, notify]
+    - name: gpl-dropped
+      removed: [GPL-*]                 # licenses dropped in the new version
+      actions: [notify]
+    - name: our-db-is-fine
+      repos: [redis/redis]             # or groups: [...]; neither means global
+      to: [any]
+      actions: [allow]
+```
+
+- **Patterns:** SPDX IDs (aliases like `BSL-1.1` are accepted), globs, `any`, `not-allowed` (outside the allowlist) and `unknown` (no license, or one that couldn't be identified).
+- **Level:** `level: any` also looks at nested license files and file headers, not just the top level.
+- **Which rule wins:** the most specific rule (repo > group > global), then the highest `priority`, then the earliest in the file.
+- **New repos:** a repo's first version is checked against the allowlist.
+
+| Action | Effect |
+|---|---|
+| `freeze` | The fork stays at the last version that passed. Takes effect immediately |
+| `block_auto_merge` | The PR is opened but never merged automatically |
+| `require_approval` | The PR merges only after you approve it |
+| `flag_pr`, `notify`, `archive`, `maintenance_branch` | Carried out by later milestones; recorded as pending until then |
+| `allow` | Accept the change; auto-merge stays on |
+
+Try your rules on real versions, check state, and lift a freeze:
+
+```sh
+forkkeeper rules test hashicorp/terraform v1.5.5 v1.6.0   # dry run, records nothing
+forkkeeper status [owner/repo]                            # frozen repos and recent decisions
+forkkeeper unfreeze --reason "upstream reverted" owner/repo
+```
 
 ## Credentials
 

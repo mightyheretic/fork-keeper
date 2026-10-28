@@ -53,30 +53,46 @@ notifications:
   ntfy:
     url: https://ntfy.sh/your-topic
 
+# What to do when an upstream's licenses change between versions.
+#   from:    licenses in the previous version (default: any)
+#   to:      licenses added in the new version
+#   removed: licenses dropped in the new version (a rule needs to and/or removed)
+# Patterns: SPDX IDs, globs (GPL-*), any, not-allowed (outside the allowlist),
+# unknown (no license, or one that couldn't be identified).
+# Actions: freeze, block_auto_merge, require_approval, flag_pr, notify, archive,
+#          maintenance_branch, allow.
+# Scope: repos: [...] or groups: [...]; neither means global. The most specific
+# matching rule wins (repo > group > global, then priority, then file order).
 license:
   allowlist: [MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0]
-  default_action: [require_approval, notify]
+  default_actions: [require_approval, notify]   # licenses changed, no rule matched
   rules:
     - name: relicense-to-source-available
-      scope: global
-      from: [MIT, Apache-2.0]
-      to: [BUSL-1.1, SSPL-1.0, Elastic-2.0]
+      from: [MIT, Apache-2.0, BSD-*, MPL-2.0]
+      to: [BUSL-1.1, SSPL-1.0, Elastic-2.0, LicenseRef-RSAL-2.0, FSL-*, LicenseRef-Commons-Clause]
       actions: [freeze, archive, notify]
     - name: gpl2-to-gpl3
-      scope: global
       from: [GPL-2.0-only, GPL-2.0-or-later]
       to: [GPL-3.0-only, GPL-3.0-or-later]
       actions: [require_approval]
-    - name: license-removed
-      scope: global
-      from: [any]
-      to: [none, unknown]
-      actions: [block_auto_merge]
+    - name: license-lost
+      to: [unknown]
+      actions: [block_auto_merge, notify]
+    - name: outside-allowlist
+      to: [not-allowed]
+      level: any          # also nested license files and file headers
+      actions: [require_approval, flag_pr, notify]
+    # Per-repo override example:
+    # - name: some-app-is-fine
+    #   repos: [upstream-org/some-app]
+    #   to: [any]
+    #   actions: [allow]
 
 repos:
   - upstream: upstream-org/some-app
     fork: your-user/some-app        # optional until the merge engine lands
     watch: releases                 # releases | tags (for projects that only tag)
+    groups: [apps]                  # optional, for group-scoped license rules
     # include_prereleases: true     # overrides watcher.include_prereleases
     stable_branch: main
     staging_branch: forkkeeper/staging

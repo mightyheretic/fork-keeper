@@ -25,14 +25,13 @@ type Config struct {
 	Database    Database    `yaml:"database"`
 	Credentials Credentials `yaml:"credentials"`
 	GitHub      GitHub      `yaml:"github"`
-
-	Watcher Watcher `yaml:"watcher"`
-	Repos   []Repo  `yaml:"repos"`
+	Watcher     Watcher     `yaml:"watcher"`
+	Repos       []Repo      `yaml:"repos"`
+	License     License     `yaml:"license"`
 
 	// Sections owned by later milestones. Kept as raw YAML so the strict
 	// decoder still catches typos in the sections above.
 	Notifications yaml.Node `yaml:"notifications"`
-	License       yaml.Node `yaml:"license"`
 }
 
 // Watcher configures upstream polling.
@@ -66,6 +65,8 @@ type Repo struct {
 	Watch string `yaml:"watch"`
 	// IncludePrereleases overrides watcher.include_prereleases.
 	IncludePrereleases *bool `yaml:"include_prereleases"`
+	// Groups name sets of repos that license rules can target.
+	Groups []string `yaml:"groups"`
 
 	// Used by later milestones.
 	StableBranch  string    `yaml:"stable_branch"`
@@ -215,6 +216,7 @@ func (c *Config) applyDefaults() {
 			c.Repos[i].Watch = WatchReleases
 		}
 	}
+	c.licenseDefaults()
 	if c.GitHub.APIURL == "" {
 		c.GitHub.APIURL = "https://api.github.com"
 	}
@@ -313,7 +315,19 @@ func (c *Config) validate() error {
 		}
 	}
 
+	c.validateLicense(add)
+
 	return errors.Join(errs...)
+}
+
+// RepoFor returns the configured repo whose upstream is fullName.
+func (c *Config) RepoFor(fullName string) (Repo, bool) {
+	for _, r := range c.Repos {
+		if strings.EqualFold(r.Upstream, fullName) {
+			return r, true
+		}
+	}
+	return Repo{}, false
 }
 
 var repoName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)

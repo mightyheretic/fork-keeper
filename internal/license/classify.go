@@ -52,7 +52,9 @@ var textPhrases = phrases(
 	`confluent community license`, "LicenseRef-Confluent-Community-1.0",
 	`sustainable use license`, "LicenseRef-Sustainable-Use-1.0",
 	`fair source license`, "LicenseRef-Fair-Source",
-	`gnu affero general public license,? version 3`, "AGPL-3.0-only",
+	// The AGPL's title line. The date keeps it from matching mentions of the
+	// AGPL inside other licenses (MPL-2.0 lists it as a "Secondary License").
+	`gnu affero general public license,? version 3, 19 nov(?:ember)? 2007`, "AGPL-3.0-only",
 	`^elastic license agreement`, "LicenseRef-Elastic-1.0",
 )
 
