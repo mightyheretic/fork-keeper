@@ -141,3 +141,57 @@ func TestEmptyFile(t *testing.T) {
 		t.Fatalf("empty file: err = %v", err)
 	}
 }
+
+func TestWatcherAndRepos(t *testing.T) {
+	cfg, err := Parse([]byte(`
+credentials: {provider: env}
+github:
+  auth:
+    default: {type: app, app_id: 1}
+    personal: {type: pat, token: github_pat}
+  repo_auth:
+    "acme/*": personal
+watcher:
+  include_prereleases: true
+repos:
+  - upstream: up/app
+  - upstream: acme/lib
+    watch: tags
+    include_prereleases: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Watcher.PollInterval != 15*time.Minute || cfg.Repos[0].Watch != WatchReleases || cfg.Repos[1].Watch != WatchTags {
+		t.Fatalf("defaults not applied: %+v", cfg.Watcher)
+	}
+	if !cfg.WantsPrereleases(cfg.Repos[0]) || cfg.WantsPrereleases(cfg.Repos[1]) {
+		t.Fatal("include_prereleases override not applied")
+	}
+	if cfg.PollAuthProfile("up/app") != "default" || cfg.PollAuthProfile("acme/lib") != "personal" {
+		t.Fatal("poll auth should follow repo_auth when watcher.auth is unset")
+	}
+	cfg.Watcher.Auth = Anonymous
+	if cfg.PollAuthProfile("acme/lib") != "" {
+		t.Fatal("anonymous should override repo_auth")
+	}
+	cfg.Watcher.Auth = "personal"
+	if cfg.PollAuthProfile("up/app") != "personal" {
+		t.Fatal("watcher.auth should apply to every upstream")
+	}
+
+	for name, raw := range map[string]string{
+		"bad upstream":  "repos:\n  - upstream: just-a-name\n",
+		"duplicate":     "repos:\n  - upstream: up/app\n  - upstream: UP/app\n",
+		"bad watch":     "repos:\n  - upstream: up/app\n    watch: commits\n",
+		"fast interval": "watcher:\n  poll_interval: 10s\n",
+		"unknown auth":  "watcher:\n  auth: nope\n",
+		"bad fork":      "repos:\n  - upstream: up/app\n    fork: x\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte("credentials: {provider: env}\n" + raw)); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}

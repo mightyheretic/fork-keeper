@@ -25,9 +25,11 @@ services:
       - ./config/forkkeeper.yaml:/etc/forkkeeper/config.yaml:ro
     # Read by the `file` credential provider from $CREDENTIALS_DIRECTORY (/run/secrets).
     # Never bake secrets into the image.
+    # Each listed secret's file must exist, or Compose won't start.
     secrets:
-      - github_app_private_key
       - github_webhook_secret
+      - github_pat
+      # - github_app_private_key   # enable once the GitHub App exists
     ports:
       # Private API: bound to localhost by default. Set API_BIND to a Tailscale or
       # WireGuard address to reach it from other devices. Never 0.0.0.0.
@@ -69,7 +71,9 @@ volumes:
   caddy-config:
 
 secrets:
-  github_app_private_key:
-    file: ./secrets/github_app_private_key.pem
   github_webhook_secret:
     file: ./secrets/github_webhook_secret
+  github_pat:
+    file: ./secrets/github_pat
+  # github_app_private_key:
+  #   file: ./secrets/github_app_private_key.pem

@@ -56,6 +56,7 @@ func (w *Webhooks) ParseWebhook(header http.Header, body []byte) (provider.Event
 		Provider:   Name,
 		DeliveryID: delivery,
 		Kind:       provider.KindIgnored,
+		Source:     provider.SourceWebhook,
 		ReceivedAt: w.now().UTC(),
 	}
 
@@ -119,10 +120,12 @@ func parseRelease(ev provider.Event, body []byte) (provider.Event, error) {
 	var p struct {
 		Action  string `json:"action"`
 		Release struct {
-			TagName    string `json:"tag_name"`
-			Name       string `json:"name"`
-			Draft      bool   `json:"draft"`
-			Prerelease bool   `json:"prerelease"`
+			TagName     string    `json:"tag_name"`
+			Name        string    `json:"name"`
+			Draft       bool      `json:"draft"`
+			Prerelease  bool      `json:"prerelease"`
+			HTMLURL     string    `json:"html_url"`
+			PublishedAt time.Time `json:"published_at"`
 		} `json:"release"`
 		Repository repository `json:"repository"`
 	}
@@ -146,6 +149,8 @@ func parseRelease(ev provider.Event, body []byte) (provider.Event, error) {
 	ev.Tag = p.Release.TagName
 	ev.ReleaseName = p.Release.Name
 	ev.Prerelease = p.Release.Prerelease
+	ev.URL = p.Release.HTMLURL
+	ev.PublishedAt = p.Release.PublishedAt
 	return ev, nil
 }
 
