@@ -1,21 +1,43 @@
 # Fork Keeper configuration. Copy to config/forkkeeper.yaml (gitignored) and edit.
 # This is a draft schema based on docs/spec.md and will change as V1 is built.
 
-data_dir: /var/lib/forkkeeper
+data_dir: ${FORKKEEPER_DATA_DIR:-/var/lib/forkkeeper}
 database:
-  driver: sqlite
-  path: /var/lib/forkkeeper/forkkeeper.db
+  driver: sqlite   # only sqlite for now
+  # path defaults to <data_dir>/forkkeeper.db
 
+# Where secrets come from. Config values below name credentials; they never
+# contain the secrets themselves.
 credentials:
-  # file | env | command  (vault later)
-  provider: file
+  provider: file   # file | env | command
   file:
-    dir: ${CREDENTIALS_DIRECTORY}
-  github_app:
-    app_id: ${GITHUB_APP_ID}
-    installation_id: ${GITHUB_APP_INSTALLATION_ID}
-    private_key: github_app_private_key   # resolved through the credential provider
-    webhook_secret: github_webhook_secret
+    # /run/secrets in the container (Compose secrets), or systemd's
+    # $CREDENTIALS_DIRECTORY when running natively.
+    dir: ${CREDENTIALS_DIRECTORY:-/run/secrets}
+  # env:
+  #   prefix: FORKKEEPER_CRED_   # github_webhook_secret -> FORKKEEPER_CRED_GITHUB_WEBHOOK_SECRET
+  # command:                     # only useful outside the container (no tools in the image)
+  #   argv: [pass, show, "forkkeeper/{name}"]
+  #   timeout: 10s
+
+github:
+  # api_url: https://api.github.com   # change for GitHub Enterprise Server
+  webhook_secret: github_webhook_secret
+  auth:
+    default:
+      type: app
+      app_id: ${GITHUB_APP_ID}
+      # Leave unset to look up the installation for each repo automatically.
+      # installation_id: 12345678
+      private_key: github_app_private_key
+    # Fallback for quick setups: a fine-grained PAT limited to your forks.
+    # personal:
+    #   type: pat
+    #   token: github_pat
+  # Map repos to auth profiles. Most specific wins; unmatched repos use "default".
+  # repo_auth:
+  #   "some-org/*": personal
+  #   "your-user/special-fork": personal
 
 watcher:
   reconcile_interval: 4h

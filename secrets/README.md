@@ -7,6 +7,7 @@ into the container at `/run/secrets/`, where the `file` credential provider read
 |---|---|
 | `github_app_private_key.pem` | GitHub App private key (the only long-lived secret) |
 | `github_webhook_secret` | GitHub App webhook signing secret |
+| `github_pat` | Optional: fine-grained PAT for a `type: pat` auth profile |
 
 Lock down permissions; Fork Keeper warns at startup if these files are group- or world-readable:
 
