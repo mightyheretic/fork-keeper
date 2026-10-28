@@ -55,12 +55,12 @@ Keep a stable, maintained fork of each open-source app you depend on. When upstr
 
 ### 4.3 License Transition Rules (merged tripwire and policy)
 
-The license gate compares the SPDX identifier, the LICENSE file and per-file headers between the previous and new version. Detected transitions are evaluated against user-defined rules.
+The license gate compares the SPDX identifier, the LICENSE file and per-file headers between the previous and new version. (Note: Business Source License 1.1 is `BUSL-1.1` in SPDX; `BSL-1.0` is the Boost license.) Detected transitions are evaluated against user-defined rules.
 
 **Rule shape:** `from-set -> to-set -> action(s)`
 
 - **From:** one or many licenses (e.g., `MIT, Apache-2.0`).
-- **To:** one or many licenses (e.g., `BSL-1.1, SSPL-1.0, Elastic-2.0`), or wildcards: `any not in allowlist`, `none/unknown`.
+- **To:** one or many licenses (e.g., `BUSL-1.1, SSPL-1.0, Elastic-2.0`), or wildcards: `any not in allowlist`, `none/unknown`.
 - **Actions** (one or more per rule):
   - Freeze fork at the last good tag
   - Block auto-merge
@@ -74,7 +74,7 @@ The license gate compares the SPDX identifier, the LICENSE file and per-file hea
 
 **Example rules**
 
-1. `MIT/Apache-2.0 -> BSL-1.1/SSPL-1.0` = freeze, archive, notify
+1. `MIT/Apache-2.0 -> BUSL-1.1/SSPL-1.0` = freeze, archive, notify
 2. `GPL-2.0 -> GPL-3.0` = require approval
 3. `any -> unknown/none` = block auto-merge
 

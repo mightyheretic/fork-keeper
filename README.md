@@ -8,11 +8,12 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1–3 done. The service polls upstream repos for new releases (or
-tags), receives and verifies GitHub webhooks, and queues each new release exactly once in
-SQLite. It authenticates to GitHub as a GitHub App or with a fine-grained PAT, using pluggable
-credential backends. Queued events are only logged until the license check and merge engine
-land in later milestones.
+**Status:** V1 milestones 1–4 done.
+- **Watching:** the service polls upstream repos for new releases (or tags) and receives verified GitHub webhooks. Each new release is queued once in SQLite.
+- **License checks:** for each new release, it compares the licenses against the previous stable version and records what changed.
+- **GitHub access:** it authenticates as a GitHub App or with a fine-grained PAT, using pluggable credential backends.
+
+Changes are only logged for now. The rule engine and merge engine land in later milestones.
 
 ## Upstream polling
 
@@ -43,6 +44,36 @@ Check access and see the latest releases without changing anything:
 docker compose run --rm forkkeeper poll --dry-run
 docker compose run --rm forkkeeper poll --repo owner/name   # one real poll
 ```
+
+## License detection
+
+For each new upstream release, Fork Keeper downloads the source tarball for that version and for
+the previous stable version (by version order). It scans each one as a stream, without
+extracting it or running anything from it. Each version's result is cached, so it's only
+downloaded once. Each scan looks at:
+
+- **License files** (`LICENSE*`, `COPYING*`, `UNLICENSE`, `LICENSES/`) anywhere in the tree.
+  Nested ones count too, e.g. an `ee/LICENSE` for enterprise code. The text is identified with
+  [licensecheck](https://github.com/google/licensecheck). Distinctive phrases catch
+  source-available licenses it doesn't know: BUSL-1.1, Elastic-2.0, SSPL-1.0, RSALv2, FSL and
+  Commons Clause.
+- **Root manifests** (`package.json`, `composer.json`, `Cargo.toml`, `pyproject.toml`), with a warning
+  when they disagree with the license files.
+- **File headers:** `SPDX-License-Identifier` tags and standard license notices in source files.
+
+`vendor/`, `node_modules/`, `third_party/` and `testdata/` are skipped. A copyright-year bump is
+not a change. Extra terms added to a known license are.
+
+You can also try it by hand, without touching the database:
+
+```sh
+forkkeeper license scan owner/repo@v1.2.3          # or a local directory
+forkkeeper license diff hashicorp/terraform v1.5.5 v1.6.0
+```
+
+`diff` exits with code 3 when licenses changed. Verified against real relicenses: Terraform
+(MPL-2.0 → BUSL-1.1), Redis (BSD-3-Clause → RSALv2/SSPL, then + AGPL-3.0) and Elasticsearch
+(Apache-2.0 → Elastic-2.0/SSPL).
 
 ## Credentials
 
