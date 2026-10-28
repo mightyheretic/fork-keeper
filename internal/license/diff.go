@@ -25,6 +25,9 @@ type Diff struct {
 	Changed     bool   `json:"changed"`
 	OldDeclared string `json:"old_declared"`
 	NewDeclared string `json:"new_declared"`
+	// OldLicenses and NewLicenses are the full top-level license sets.
+	OldLicenses []string `json:"old_licenses"`
+	NewLicenses []string `json:"new_licenses"`
 	// Added and Removed are top-level license IDs.
 	Added   []string     `json:"added,omitempty"`
 	Removed []string     `json:"removed,omitempty"`
@@ -71,6 +74,7 @@ func Compare(oldRef string, old *Report, newRef string, cur *Report) *Diff {
 	d := &Diff{
 		OldRef: oldRef, NewRef: newRef,
 		OldDeclared: old.Declared, NewDeclared: cur.Declared,
+		OldLicenses: old.Licenses, NewLicenses: cur.Licenses,
 	}
 	d.Added, d.Removed = setDiff(old.Licenses, cur.Licenses)
 

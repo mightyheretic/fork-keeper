@@ -198,8 +198,8 @@ Fork Keeper combines fork syncing, license-aware policy and archival in one self
 
 ## 9. Open Questions
 
-1. Freeze semantics: full stop, or continued security cherry-picks?
-2. Compound-license handling in rules (`OR`, `AND`, added/removed licenses).
+1. Freeze semantics: full stop, or continued security cherry-picks? (V1: full stop at the last good version; unfreeze via CLI with a recorded reason.)
+2. ~~Compound-license handling in rules~~ Decided: `from` matches the old version's licenses, `to` matches licenses added, `removed` matches licenses dropped; AND/OR restructuring without an added or removed license falls to the default rule.
 3. Per-file license change detection: how deep, and how to avoid noise.
 4. V2 UI exposure: public with strong auth, or VPN-only?
 5. State store: SQLite or Postgres?

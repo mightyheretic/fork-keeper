@@ -144,6 +144,17 @@ func TestClassifyText(t *testing.T) {
 	if c.Expr == nil || c.Expr.String() != "LicenseRef-Commons-Clause AND MIT" {
 		t.Fatalf("MIT + Commons Clause: %v", c.Expr)
 	}
+	// MPL-2.0 names the AGPL as a "Secondary License"; that is not an AGPL grant.
+	secondary := `1.12. "Secondary License" means either the GNU General Public License,
+Version 2.0, the GNU Lesser General Public License, Version 2.1, the GNU Affero
+General Public License, Version 3.0, or any later versions of those licenses.`
+	if c := ClassifyText([]byte(secondary)); c.Expr != nil && slices.Contains(c.Expr.Licenses(), "AGPL-3.0-only") {
+		t.Fatalf("AGPL mention misread as a grant: %v", c.Expr)
+	}
+	agplTitle := "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\n"
+	if c := ClassifyText([]byte(agplTitle)); c.Expr == nil || c.Expr.String() != "AGPL-3.0-only" {
+		t.Fatalf("AGPL title: %v", c.Expr)
+	}
 	if c := ClassifyText([]byte("All rights reserved. Do not copy.")); c.Expr != nil {
 		t.Fatalf("proprietary text classified as %v", c.Expr)
 	}

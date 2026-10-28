@@ -10,15 +10,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
+	"github.com/mightyheretic/fork-keeper/internal/pipeline"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
+	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
 	"github.com/mightyheretic/fork-keeper/internal/watcher"
 	"github.com/mightyheretic/fork-keeper/internal/webhook"
@@ -48,12 +49,18 @@ func main() {
 		os.Exit(pollCmd(os.Args[2:]))
 	case "license":
 		os.Exit(licenseCmd(os.Args[2:]))
+	case "rules":
+		os.Exit(rulesCmd(os.Args[2:]))
+	case "status":
+		os.Exit(statusCmd(os.Args[2:]))
+	case "unfreeze":
+		os.Exit(unfreezeCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -237,43 +244,6 @@ func warnAnonymousQuota(cfg *config.Config, log *slog.Logger) {
 	}
 }
 
-// processor handles queued events. For now that is the license gate; the
-// rule engine and merge engine plug in after it in later milestones.
-func processor(cfg *config.Config, g *gate.Gate, log *slog.Logger) worker.Processor {
-	upstreams := map[string]bool{}
-	for _, r := range cfg.Repos {
-		upstreams[strings.ToLower(r.Upstream)] = true
-	}
-	return func(ctx context.Context, ev provider.Event) error {
-		log := log.With("repo", ev.Repo.FullName(), "tag", ev.Tag, "source", ev.Source, "delivery", ev.DeliveryID)
-		if ev.Kind != provider.KindRelease && ev.Kind != provider.KindTag {
-			return nil
-		}
-		if !upstreams[strings.ToLower(ev.Repo.FullName())] {
-			log.Info("ignoring event for a repo that isn't a configured upstream")
-			return nil
-		}
-		res, err := g.Check(ctx, ev)
-		if errors.Is(err, provider.ErrRefNotFound) {
-			return worker.Permanent(err)
-		}
-		if err != nil {
-			return err
-		}
-		switch {
-		case res.Diff == nil:
-			log.Info("license baseline recorded", "declared", res.Report.Declared)
-		case res.Diff.Changed:
-			log.Warn("LICENSE CHANGE DETECTED", "previous", res.Previous, "summary", res.Diff.Summary(),
-				"old_declared", res.Diff.OldDeclared, "new_declared", res.Diff.NewDeclared,
-				"added", res.Diff.Added, "removed", res.Diff.Removed)
-		default:
-			log.Info("license unchanged", "previous", res.Previous, "declared", res.Report.Declared)
-		}
-		return nil
-	}
-}
-
 // check validates the config and credentials, then exits. Use it after
 // setup: `docker compose run --rm forkkeeper check`.
 func check() int {
@@ -326,7 +296,8 @@ func serve() error {
 	licenseGate := gate.New(db, map[string]provider.ArchiveFetcher{
 		github.Name: github.NewArchives(cfg.GitHub.APIURL, upstreamToken(cfg, auth)),
 	}, log.With("component", "gate"))
-	w := worker.New(db, processor(cfg, licenseGate, log), log.With("component", "worker"))
+	pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, log.With("component", "pipeline"))
+	w := worker.New(db, pipe.Process, log.With("component", "worker"))
 
 	webhookSecret := func() ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
