@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mightyheretic/fork-keeper/internal/config"
+	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -23,6 +24,9 @@ import (
 )
 
 var version = "dev"
+
+// revalidateEvery re-checks credentials so an approaching expiry is noticed.
+const revalidateEvery = 24 * time.Hour
 
 func main() {
 	cmd := "serve"
@@ -36,12 +40,14 @@ func main() {
 			slog.Error("server exited", "err", err)
 			os.Exit(1)
 		}
+	case "check":
+		os.Exit(check())
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -61,21 +67,119 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// fileSecret reads a secret from $CREDENTIALS_DIRECTORY on every call, so a
-// rotated file takes effect without a restart. Replaced by the pluggable
-// credential provider in milestone 2.
-func fileSecret(name string) github.SecretFunc {
-	return func() ([]byte, error) {
-		dir := os.Getenv("CREDENTIALS_DIRECTORY")
-		if dir == "" {
-			return nil, errors.New("CREDENTIALS_DIRECTORY is not set")
-		}
-		b, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read credential %q: %w", name, err)
-		}
-		return bytes.TrimRight(b, "\r\n"), nil
+func loadConfig() (*config.Config, error) {
+	return config.Load(getenv("FORKKEEPER_CONFIG", "/etc/forkkeeper/config.yaml"))
+}
+
+func newCredentials(c config.Credentials) credentials.Provider {
+	switch c.Provider {
+	case "env":
+		return credentials.Env{Prefix: c.Env.Prefix}
+	case "command":
+		return &credentials.Command{Argv: c.Command.Argv, Timeout: c.Command.Timeout}
+	default:
+		return credentials.File{Dir: c.File.Dir}
 	}
+}
+
+func newGitHubAuth(cfg *config.Config, creds credentials.Provider) *github.Auth {
+	sources := make(map[string]github.TokenSource, len(cfg.GitHub.Auth))
+	for name, a := range cfg.GitHub.Auth {
+		switch a.Type {
+		case config.AuthApp:
+			sources[name] = github.NewAppAuth(github.AppConfig{
+				APIURL:         cfg.GitHub.APIURL,
+				AppID:          a.AppID,
+				InstallationID: a.InstallationID,
+				PrivateKey:     a.PrivateKey,
+			}, creds)
+		case config.AuthPAT:
+			sources[name] = github.NewPATAuth(cfg.GitHub.APIURL, a.Token, creds, nil)
+		}
+	}
+	return github.NewAuth(sources, cfg.GitHub.AuthProfileFor)
+}
+
+// auditCredentials checks that every referenced credential exists and is
+// stored safely. It returns false if any is missing or unreadable.
+func auditCredentials(ctx context.Context, log *slog.Logger, creds credentials.Provider, names []string) bool {
+	ok := true
+	for _, name := range names {
+		if _, err := creds.Get(ctx, name); err != nil {
+			log.Error("credential unavailable", "provider", creds.Kind(), "err", err)
+			ok = false
+			continue
+		}
+		if c, isChecker := creds.(credentials.Checker); isChecker {
+			warnings, err := c.Check(name)
+			if err != nil {
+				log.Warn("credential check failed", "credential", name, "err", err)
+			}
+			for _, w := range warnings {
+				log.Warn(w, "credential", name)
+			}
+		}
+	}
+	return ok
+}
+
+// validateAuth makes one GitHub call per auth profile and logs what each
+// credential can do. It returns false if any profile failed.
+func validateAuth(ctx context.Context, log *slog.Logger, auth *github.Auth) bool {
+	profiles := auth.Profiles()
+	if len(profiles) == 0 {
+		log.Warn("no GitHub auth profiles configured; webhooks are received but repos cannot be accessed")
+		return true
+	}
+	ok := true
+	for _, name := range profiles {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		r, err := auth.Profile(name).Validate(ctx)
+		cancel()
+		if err != nil {
+			log.Error("GitHub credential validation failed", "profile", name, "err", err)
+			ok = false
+			continue
+		}
+		attrs := []any{"profile", name, "kind", r.Kind, "identity", r.Identity}
+		if len(r.Permissions) > 0 {
+			attrs = append(attrs, "permissions", r.Permissions)
+		}
+		if len(r.Events) > 0 {
+			attrs = append(attrs, "events", r.Events)
+		}
+		if len(r.Scopes) > 0 {
+			attrs = append(attrs, "scopes", r.Scopes)
+		}
+		if !r.ExpiresAt.IsZero() {
+			attrs = append(attrs, "expires_at", r.ExpiresAt)
+		}
+		log.Info("GitHub credential valid", attrs...)
+		for _, w := range r.Warnings {
+			log.Warn(w, "profile", name)
+		}
+	}
+	return ok
+}
+
+// check validates the config and credentials, then exits. Use it after
+// setup: `docker compose run --rm forkkeeper check`.
+func check() int {
+	log := newLogger()
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Error("invalid config", "err", err)
+		return 1
+	}
+	ctx := context.Background()
+	creds := newCredentials(cfg.Credentials)
+	ok := auditCredentials(ctx, log, creds, cfg.CredentialNames())
+	ok = validateAuth(ctx, log, newGitHubAuth(cfg, creds)) && ok
+	if !ok {
+		return 1
+	}
+	log.Info("configuration and credentials OK")
+	return 0
 }
 
 func serve() error {
@@ -85,8 +189,21 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	dataDir := getenv("FORKKEEPER_DATA_DIR", "/var/lib/forkkeeper")
-	db, err := store.Open(ctx, filepath.Join(dataDir, "forkkeeper.db"))
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	creds := newCredentials(cfg.Credentials)
+	auth := newGitHubAuth(cfg, creds)
+	// Report problems but keep running: webhooks are still recorded, and a
+	// fixed credential is picked up on SIGHUP.
+	auditCredentials(ctx, log, creds, cfg.CredentialNames())
+	validateAuth(ctx, log, auth)
+
+	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o700); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	db, err := store.Open(ctx, cfg.Database.Path)
 	if err != nil {
 		return err
 	}
@@ -97,13 +214,19 @@ func serve() error {
 		log.Warn("requeued deliveries interrupted by previous shutdown", "count", n)
 	}
 
-	// Milestone 1 only records and logs events. License checks and merges
-	// plug in here in later milestones.
+	// Later milestones replace this with license checks and merges.
 	w := worker.New(db, func(ctx context.Context, ev provider.Event) error {
 		log.Info("event received", "kind", ev.Kind, "repo", ev.Repo.FullName(),
 			"tag", ev.Tag, "prerelease", ev.Prerelease, "delivery", ev.DeliveryID)
 		return nil
 	}, log.With("component", "worker"))
+
+	webhookSecret := func() ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		s, err := creds.Get(ctx, cfg.GitHub.WebhookSecret)
+		return s.Bytes(), err
+	}
 
 	// Public listener: webhooks only.
 	public := http.NewServeMux()
@@ -115,7 +238,7 @@ func serve() error {
 		rw.WriteHeader(http.StatusOK)
 	})
 	webhook.NewHandler(db, w.Wake, log.With("component", "webhook"),
-		github.NewWebhooks(fileSecret("github_webhook_secret")),
+		github.NewWebhooks(webhookSecret),
 	).Register(public)
 
 	// Private listener: API for the CLI and the V2 UI.
@@ -134,6 +257,7 @@ func serve() error {
 		defer close(workerDone)
 		w.Run(ctx)
 	}()
+	go watchCredentials(ctx, log, cfg, creds, auth)
 
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
@@ -159,6 +283,31 @@ func serve() error {
 	}
 	<-workerDone
 	return runErr
+}
+
+// watchCredentials reloads credentials on SIGHUP and re-validates them daily.
+func watchCredentials(ctx context.Context, log *slog.Logger, cfg *config.Config, creds credentials.Provider, auth *github.Auth) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	ticker := time.NewTicker(revalidateEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			log.Info("SIGHUP received, reloading credentials")
+			if r, ok := creds.(credentials.Reloader); ok {
+				r.Reload()
+			}
+			auth.Reset()
+			auditCredentials(ctx, log, creds, cfg.CredentialNames())
+		case <-ticker.C:
+		}
+		validateAuth(ctx, log, auth)
+	}
 }
 
 func newServer(addr string, h http.Handler) *http.Server {
