@@ -8,7 +8,18 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** pre-V1 scaffold. Only the container, deployment config and a placeholder binary exist so far.
+**Status:** V1 milestone 1 done. The service receives and verifies GitHub webhooks, drops
+duplicate deliveries and queues them durably in SQLite. Queued events are only logged until
+the license check and merge engine land in later milestones.
+
+## GitHub webhook setup
+
+In the GitHub App (or repo webhook) settings:
+
+- **Payload URL:** `https://$FORKKEEPER_DOMAIN/webhooks/github`
+- **Content type:** `application/json`
+- **Secret:** the contents of `secrets/github_webhook_secret`
+- **Events:** *Releases* and *Branch or tag creation*
 
 ## Layout
 
