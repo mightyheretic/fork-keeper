@@ -1,0 +1,25 @@
+# Local deployment config and secrets
+.env
+config/forkkeeper.yaml
+secrets/*
+!secrets/README.md
+
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/data/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

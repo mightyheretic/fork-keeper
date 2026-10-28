@@ -1,0 +1,14 @@
+# Keep secrets, local config and state out of the build context.
+.git
+.env
+.env.*
+secrets/
+config/
+deploy/
+docs/
+data/
+*.db*
+compose*.yaml
+Dockerfile
+.dockerignore
+README.md

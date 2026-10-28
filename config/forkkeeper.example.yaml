@@ -1,0 +1,55 @@
+# Fork Keeper configuration. Copy to config/forkkeeper.yaml (gitignored) and edit.
+# This is a draft schema based on docs/spec.md and will change as V1 is built.
+
+data_dir: /var/lib/forkkeeper
+database:
+  driver: sqlite
+  path: /var/lib/forkkeeper/forkkeeper.db
+
+credentials:
+  # file | env | command  (vault later)
+  provider: file
+  file:
+    dir: ${CREDENTIALS_DIRECTORY}
+  github_app:
+    app_id: ${GITHUB_APP_ID}
+    installation_id: ${GITHUB_APP_INSTALLATION_ID}
+    private_key: github_app_private_key   # resolved through the credential provider
+    webhook_secret: github_webhook_secret
+
+watcher:
+  reconcile_interval: 4h
+
+notifications:
+  ntfy:
+    url: https://ntfy.sh/your-topic
+
+license:
+  allowlist: [MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0]
+  default_action: [require_approval, notify]
+  rules:
+    - name: relicense-to-source-available
+      scope: global
+      from: [MIT, Apache-2.0]
+      to: [BSL-1.1, SSPL-1.0, Elastic-2.0]
+      actions: [freeze, archive, notify]
+    - name: gpl2-to-gpl3
+      scope: global
+      from: [GPL-2.0-only, GPL-2.0-or-later]
+      to: [GPL-3.0-only, GPL-3.0-or-later]
+      actions: [require_approval]
+    - name: license-removed
+      scope: global
+      from: [any]
+      to: [none, unknown]
+      actions: [block_auto_merge]
+
+repos:
+  - fork: your-user/some-app
+    upstream: upstream-org/some-app
+    stable_branch: main
+    staging_branch: forkkeeper/staging
+    merge_strategy: merge   # merge | rebase | patch-stack
+    archive:
+      mirrors: []
+      software_heritage: true

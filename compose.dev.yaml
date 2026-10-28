@@ -1,0 +1,9 @@
+# Local development override: no Caddy or TLS, and the webhook port is on localhost.
+# Usage: docker compose -f compose.yaml -f compose.dev.yaml up --build forkkeeper
+# Use a tunnel (e.g. smee.io or `gh webhook forward`) to deliver GitHub webhooks locally.
+services:
+  forkkeeper:
+    environment:
+      FORKKEEPER_LOG_LEVEL: debug
+    ports:
+      - "127.0.0.1:8080:8080"

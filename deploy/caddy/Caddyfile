@@ -1,0 +1,26 @@
+# Only the webhook endpoint is public (spec §6.2). Everything else returns 404.
+{$FORKKEEPER_DOMAIN} {
+	encode zstd gzip
+
+	handle /webhooks/* {
+		request_body {
+			max_size 25MB
+		}
+		reverse_proxy forkkeeper:8080
+	}
+
+	handle {
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
