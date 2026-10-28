@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mightyheretic/fork-keeper/internal/provider"
 )
 
 const (
@@ -43,55 +46,112 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("github %s %s: %d %s", e.Method, e.Path, e.Status, e.Message)
 }
 
+// request describes one API call.
+type request struct {
+	method string
+	path   string
+	bearer string // never included in errors
+	body   any
+	etag   string // sent as If-None-Match
+}
+
+// response is a completed API call.
+type response struct {
+	header      http.Header
+	notModified bool
+}
+
 // do sends a request and decodes a JSON response into out (if non-nil).
-// The bearer value is never included in errors.
 func (c *apiClient) do(ctx context.Context, method, path, bearer string, in, out any) (http.Header, error) {
+	resp, err := c.send(ctx, request{method: method, path: path, bearer: bearer, body: in}, out)
+	return resp.header, err
+}
+
+func (c *apiClient) send(ctx context.Context, r request, out any) (response, error) {
 	var body io.Reader
-	if in != nil {
-		b, err := json.Marshal(in)
+	if r.body != nil {
+		b, err := json.Marshal(r.body)
 		if err != nil {
-			return nil, err
+			return response{}, err
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, r.method, c.base+r.path, body)
 	if err != nil {
-		return nil, err
+		return response{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", apiVersion)
 	req.Header.Set("User-Agent", c.userAgent)
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+	if r.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+r.bearer)
 	}
-	if in != nil {
+	if r.body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("github %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
-	if err != nil {
-		return nil, fmt.Errorf("github %s %s: read response: %w", method, path, err)
+	if r.etag != "" {
+		req.Header.Set("If-None-Match", r.etag)
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	httpResp, err := c.http.Do(req)
+	if err != nil {
+		return response{}, fmt.Errorf("github %s %s: %w", r.method, r.path, err)
+	}
+	defer httpResp.Body.Close()
+	resp := response{header: httpResp.Header}
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, maxRespBytes))
+	if err != nil {
+		return resp, fmt.Errorf("github %s %s: read response: %w", r.method, r.path, err)
+	}
+
+	if httpResp.StatusCode == http.StatusNotModified && r.etag != "" {
+		resp.notModified = true
+		return resp, nil
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+		if rl := rateLimitError(httpResp); rl != nil {
+			return resp, rl
+		}
 		var e struct {
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(data, &e)
 		if e.Message == "" {
-			e.Message = http.StatusText(resp.StatusCode)
+			e.Message = http.StatusText(httpResp.StatusCode)
 		}
-		return resp.Header, &APIError{Status: resp.StatusCode, Method: method, Path: path, Message: e.Message}
+		return resp, &APIError{Status: httpResp.StatusCode, Method: r.method, Path: r.path, Message: e.Message}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
-			return resp.Header, fmt.Errorf("github %s %s: decode response: %w", method, path, err)
+			return resp, fmt.Errorf("github %s %s: decode response: %w", r.method, r.path, err)
 		}
 	}
-	return resp.Header, nil
+	return resp, nil
+}
+
+// rateLimitError recognizes GitHub's primary (403/429 with no remaining
+// quota) and secondary (Retry-After) rate limits.
+func rateLimitError(resp *http.Response) *provider.RateLimitError {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	if s := resp.Header.Get("Retry-After"); s != "" {
+		if secs, err := strconv.Atoi(s); err == nil {
+			return &provider.RateLimitError{Reset: time.Now().Add(time.Duration(secs) * time.Second)}
+		}
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		return &provider.RateLimitError{Reset: parseRateLimit(resp.Header).Reset}
+	}
+	return nil
+}
+
+func parseRateLimit(h http.Header) provider.RateLimit {
+	var rl provider.RateLimit
+	rl.Limit, _ = strconv.Atoi(h.Get("X-RateLimit-Limit"))
+	rl.Remaining, _ = strconv.Atoi(h.Get("X-RateLimit-Remaining"))
+	if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+		rl.Reset = time.Unix(reset, 0)
+	}
+	return rl
 }

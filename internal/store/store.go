@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +30,9 @@ type Store struct {
 // Open opens (creating if needed) the SQLite database at path and applies
 // any pending migrations.
 func Open(ctx context.Context, path string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
 	q := url.Values{}
 	for _, p := range []string{"busy_timeout(5000)", "journal_mode(WAL)", "foreign_keys(1)", "synchronous(NORMAL)"} {
 		q.Add("_pragma", p)

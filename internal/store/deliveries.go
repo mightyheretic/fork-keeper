@@ -30,12 +30,19 @@ type Job struct {
 // It returns false, without error, if the same provider and delivery ID was
 // already recorded, so retries and replays are processed at most once.
 func (s *Store) EnqueueDelivery(ctx context.Context, ev provider.Event) (bool, error) {
+	return enqueue(ctx, s.db, ev, s.nowMillis())
+}
+
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func enqueue(ctx context.Context, db execer, ev provider.Event, now int64) (bool, error) {
 	payload, err := json.Marshal(ev)
 	if err != nil {
 		return false, fmt.Errorf("encode event: %w", err)
 	}
-	now := s.nowMillis()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		INSERT INTO webhook_deliveries
 			(provider, delivery_id, kind, repo, event, next_attempt_at, received_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)

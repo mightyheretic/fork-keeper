@@ -5,8 +5,11 @@
 package provider
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -45,9 +48,77 @@ type Event struct {
 	Repo       Repo      `json:"repo"`
 	Tag        string    `json:"tag,omitempty"`
 	// ReleaseName is the human-readable release title, if any.
-	ReleaseName string    `json:"release_name,omitempty"`
-	Prerelease  bool      `json:"prerelease,omitempty"`
-	ReceivedAt  time.Time `json:"received_at"`
+	ReleaseName string `json:"release_name,omitempty"`
+	Prerelease  bool   `json:"prerelease,omitempty"`
+	// URL links to the release or tag page, when known.
+	URL string `json:"url,omitempty"`
+	// PublishedAt is when upstream published the release, when known.
+	PublishedAt time.Time `json:"published_at,omitzero"`
+	// Source is how the event was discovered: SourceWebhook or SourcePoll.
+	Source     string    `json:"source,omitempty"`
+	ReceivedAt time.Time `json:"received_at"`
+}
+
+// Event sources.
+const (
+	SourceWebhook = "webhook"
+	SourcePoll    = "poll"
+)
+
+// ParseRepo parses "owner/name".
+func ParseRepo(fullName string) (Repo, error) {
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return Repo{}, fmt.Errorf("invalid repo %q: want owner/name", fullName)
+	}
+	return Repo{Owner: owner, Name: name}, nil
+}
+
+// Ref is a release or tag listed by a provider.
+type Ref struct {
+	Kind        EventKind // KindRelease or KindTag
+	Name        string    // tag name
+	Title       string    // release title, if any
+	Prerelease  bool
+	PublishedAt time.Time // zero for plain tags
+	URL         string
+}
+
+// RefList is one page of refs from a poll.
+type RefList struct {
+	// Refs are newest first when the provider can order them.
+	Refs []Ref
+	// ETag identifies this response for the next conditional request.
+	ETag string
+	// NotModified means the ETag matched and Refs is empty.
+	NotModified bool
+	RateLimit   RateLimit
+}
+
+// RateLimit is the provider's API quota after a request. Zero values mean
+// the provider didn't report it.
+type RateLimit struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
+}
+
+// RateLimitError means the API quota is exhausted until Reset.
+type RateLimitError struct {
+	Reset time.Time
+}
+
+func (e *RateLimitError) Error() string {
+	return "API rate limit exceeded until " + e.Reset.Format(time.RFC3339)
+}
+
+// RefLister lists an upstream repo's releases or tags for polling.
+type RefLister interface {
+	// ListReleases returns recent published releases. When etag matches,
+	// it returns NotModified instead.
+	ListReleases(ctx context.Context, repo Repo, etag string) (RefList, error)
+	// ListTags returns the repo's tags, for projects that don't publish releases.
+	ListTags(ctx context.Context, repo Repo) (RefList, error)
 }
 
 // Errors returned by WebhookParser.ParseWebhook. The webhook handler maps

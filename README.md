@@ -8,10 +8,41 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1 and 2 done. The service receives and verifies GitHub webhooks,
-drops duplicate deliveries and queues them durably in SQLite. It authenticates to GitHub as a
-GitHub App (or with a fine-grained PAT) using pluggable credential backends. Queued events are
-only logged until the license check and merge engine land in later milestones.
+**Status:** V1 milestones 1–3 done. The service polls upstream repos for new releases (or
+tags), receives and verifies GitHub webhooks, and queues each new release exactly once in
+SQLite. It authenticates to GitHub as a GitHub App or with a fine-grained PAT, using pluggable
+credential backends. Queued events are only logged until the license check and merge engine
+land in later milestones.
+
+## Upstream polling
+
+GitHub only sends webhooks for repos where your App is installed, and that's normally your forks,
+not the upstreams you follow. So Fork Keeper finds upstream releases by polling. List them under
+`repos:` in the config:
+
+```yaml
+repos:
+  - upstream: hashicorp/terraform
+  - upstream: git/git
+    watch: tags          # for projects that tag but don't publish GitHub releases
+```
+
+- Each upstream is polled every `watcher.poll_interval` (default 15m), using conditional requests (ETags).
+- The first poll of a repo only records the releases that already exist, so adding a repo doesn't replay its history.
+- After that, each new release is queued once, oldest first. Pre-releases are queued only if `include_prereleases` is on.
+- When the rate limit runs out, polling pauses until it resets.
+
+Polling works without credentials, but GitHub allows anonymous clients only 60 requests an hour,
+and every anonymous request counts, even "not modified" ones. For more than a handful of repos,
+create a fine-grained PAT with **Public repositories (read-only)** access. Save it as
+`secrets/github_pat`, add a `type: pat` profile, and set `watcher.auth` to that profile.
+
+Check access and see the latest releases without changing anything:
+
+```sh
+docker compose run --rm forkkeeper poll --dry-run
+docker compose run --rm forkkeeper poll --repo owner/name   # one real poll
+```
 
 ## Credentials
 

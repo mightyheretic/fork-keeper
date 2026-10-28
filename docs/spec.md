@@ -42,8 +42,8 @@ Keep a stable, maintained fork of each open-source app you depend on. When upstr
 
 ### 4.1 Release Watcher
 
-- Primary trigger: webhooks (release and tag events).
-- Safety net: slow reconciliation poll (every few hours) to catch dropped or missed webhooks. This matters most for the license tripwire.
+- Primary trigger for upstreams: polling the provider's release (or tag) API with conditional requests. Webhooks only reach repos where the App is installed, which normally excludes upstreams you don't own.
+- Webhooks (release and tag events) are used where available, for example for upstreams you control, and for events on your own forks.
 - Provider adapter interface: each provider implements webhook verification, event normalization, repo operations and PR/MR creation. V1 ships GitHub only; the core never depends on GitHub-specific code.
 
 ### 4.2 Merge Engine
@@ -204,15 +204,16 @@ Fork Keeper combines fork syncing, license-aware policy and archival in one self
 4. V2 UI exposure: public with strong auth, or VPN-only?
 5. State store: SQLite or Postgres?
 6. Where CI sandbox runs (container vs systemd-nspawn) and how results are reported back.
-7. Reconciliation poll interval.
+7. Poll interval (default 15 minutes; anonymous access limits this to a handful of repos).
 
 ## 10. Suggested V1 Milestones
 
 1. Provider adapter interface, GitHub adapter, webhook receiver with verification and idempotency
 2. Credential provider (file/env/command) and GitHub App auth
-3. License diff detection (SPDX, LICENSE file, headers)
-4. Rule engine with scopes, priorities and actions
-5. Merge engine on staging branch with PR creation
-6. Archival mirror and Software Heritage snapshot
-7. CLI for approvals and rule management, audit log, notifications
-8. Reconciliation poll, systemd unit and hardening, packaging
+3. Upstream release polling (moved up from milestone 8: it is the primary trigger for upstreams)
+4. License diff detection (SPDX, LICENSE file, headers)
+5. Rule engine with scopes, priorities and actions
+6. Merge engine on staging branch with PR creation
+7. Archival mirror and Software Heritage snapshot
+8. CLI for approvals and rule management, audit log, notifications
+9. systemd unit and hardening, packaging

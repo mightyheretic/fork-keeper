@@ -39,8 +39,15 @@ github:
   #   "some-org/*": personal
   #   "your-user/special-fork": personal
 
+# Upstream release polling. Webhooks only reach repos where the GitHub App is
+# installed (your forks), so polling is how upstream releases are found.
 watcher:
-  reconcile_interval: 4h
+  poll_interval: 15m
+  include_prereleases: false
+  # Auth profile for polling, or "anonymous" (60 requests/hour). When unset,
+  # github.repo_auth is applied to each upstream name, else anonymous. A
+  # fine-grained PAT with read access to public repos is the simplest choice.
+  # auth: personal
 
 notifications:
   ntfy:
@@ -67,8 +74,10 @@ license:
       actions: [block_auto_merge]
 
 repos:
-  - fork: your-user/some-app
-    upstream: upstream-org/some-app
+  - upstream: upstream-org/some-app
+    fork: your-user/some-app        # optional until the merge engine lands
+    watch: releases                 # releases | tags (for projects that only tag)
+    # include_prereleases: true     # overrides watcher.include_prereleases
     stable_branch: main
     staging_branch: forkkeeper/staging
     merge_strategy: merge   # merge | rebase | patch-stack

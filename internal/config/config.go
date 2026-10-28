@@ -26,12 +26,73 @@ type Config struct {
 	Credentials Credentials `yaml:"credentials"`
 	GitHub      GitHub      `yaml:"github"`
 
+	Watcher Watcher `yaml:"watcher"`
+	Repos   []Repo  `yaml:"repos"`
+
 	// Sections owned by later milestones. Kept as raw YAML so the strict
 	// decoder still catches typos in the sections above.
-	Watcher       yaml.Node `yaml:"watcher"`
 	Notifications yaml.Node `yaml:"notifications"`
 	License       yaml.Node `yaml:"license"`
-	Repos         yaml.Node `yaml:"repos"`
+}
+
+// Watcher configures upstream polling.
+type Watcher struct {
+	// PollInterval is how often each upstream is polled. Default 15m.
+	PollInterval time.Duration `yaml:"poll_interval"`
+	// IncludePrereleases queues pre-releases too. Repos can override it.
+	IncludePrereleases bool `yaml:"include_prereleases"`
+	// Auth is the GitHub auth profile used to poll upstreams, or
+	// "anonymous". When empty, github.repo_auth is applied to the upstream
+	// name, falling back to anonymous if nothing matches.
+	Auth string `yaml:"auth"`
+}
+
+// Watch modes.
+const (
+	WatchReleases = "releases"
+	WatchTags     = "tags"
+)
+
+// Anonymous is the Watcher.Auth value for unauthenticated polling.
+const Anonymous = "anonymous"
+
+// Repo is one fork Fork Keeper maintains.
+type Repo struct {
+	// Fork is your fork ("owner/name"). Optional until the merge engine.
+	Fork string `yaml:"fork"`
+	// Upstream is the repo being followed ("owner/name").
+	Upstream string `yaml:"upstream"`
+	// Watch is "releases" (default) or "tags" for projects without releases.
+	Watch string `yaml:"watch"`
+	// IncludePrereleases overrides watcher.include_prereleases.
+	IncludePrereleases *bool `yaml:"include_prereleases"`
+
+	// Used by later milestones.
+	StableBranch  string    `yaml:"stable_branch"`
+	StagingBranch string    `yaml:"staging_branch"`
+	MergeStrategy string    `yaml:"merge_strategy"`
+	Archive       yaml.Node `yaml:"archive"`
+}
+
+// WantsPrereleases reports whether pre-releases of r should be queued.
+func (c *Config) WantsPrereleases(r Repo) bool {
+	if r.IncludePrereleases != nil {
+		return *r.IncludePrereleases
+	}
+	return c.Watcher.IncludePrereleases
+}
+
+// PollAuthProfile returns the auth profile for polling upstream ("owner/name"),
+// or "" for anonymous access.
+func (c *Config) PollAuthProfile(upstream string) string {
+	switch c.Watcher.Auth {
+	case Anonymous:
+		return ""
+	case "":
+		return c.GitHub.AuthProfileFor(upstream)
+	default:
+		return c.Watcher.Auth
+	}
 }
 
 type Database struct {
@@ -146,6 +207,14 @@ func (c *Config) applyDefaults() {
 	if c.Credentials.Provider == "" {
 		c.Credentials.Provider = "file"
 	}
+	if c.Watcher.PollInterval == 0 {
+		c.Watcher.PollInterval = 15 * time.Minute
+	}
+	for i := range c.Repos {
+		if c.Repos[i].Watch == "" {
+			c.Repos[i].Watch = WatchReleases
+		}
+	}
 	if c.GitHub.APIURL == "" {
 		c.GitHub.APIURL = "https://api.github.com"
 	}
@@ -219,8 +288,37 @@ func (c *Config) validate() error {
 		}
 	}
 
+	if c.Watcher.PollInterval < time.Minute {
+		add("watcher.poll_interval: must be at least 1m")
+	}
+	if a := c.Watcher.Auth; a != "" && a != Anonymous {
+		if _, ok := c.GitHub.Auth[a]; !ok {
+			add("watcher.auth: unknown auth profile %q", a)
+		}
+	}
+	seen := map[string]bool{}
+	for i, r := range c.Repos {
+		p := fmt.Sprintf("repos[%d]", i)
+		if !validRepoName(r.Upstream) {
+			add("%s.upstream: %q is not owner/name", p, r.Upstream)
+		} else if seen[strings.ToLower(r.Upstream)] {
+			add("%s.upstream: %s is listed twice", p, r.Upstream)
+		}
+		seen[strings.ToLower(r.Upstream)] = true
+		if r.Fork != "" && !validRepoName(r.Fork) {
+			add("%s.fork: %q is not owner/name", p, r.Fork)
+		}
+		if r.Watch != WatchReleases && r.Watch != WatchTags {
+			add("%s.watch: unknown mode %q (want releases or tags)", p, r.Watch)
+		}
+	}
+
 	return errors.Join(errs...)
 }
+
+var repoName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+func validRepoName(s string) bool { return repoName.MatchString(s) }
 
 var repoPattern = regexp.MustCompile(`^(\*|[A-Za-z0-9_.-]+/(\*|[A-Za-z0-9_.-]+))$`)
 

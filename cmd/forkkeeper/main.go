@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
 	"github.com/mightyheretic/fork-keeper/internal/store"
+	"github.com/mightyheretic/fork-keeper/internal/watcher"
 	"github.com/mightyheretic/fork-keeper/internal/webhook"
 	"github.com/mightyheretic/fork-keeper/internal/worker"
 )
@@ -42,12 +42,14 @@ func main() {
 		}
 	case "check":
 		os.Exit(check())
+	case "poll":
+		os.Exit(pollCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -128,7 +130,7 @@ func auditCredentials(ctx context.Context, log *slog.Logger, creds credentials.P
 func validateAuth(ctx context.Context, log *slog.Logger, auth *github.Auth) bool {
 	profiles := auth.Profiles()
 	if len(profiles) == 0 {
-		log.Warn("no GitHub auth profiles configured; webhooks are received but repos cannot be accessed")
+		log.Warn("no GitHub auth profiles configured; upstreams are polled anonymously and forks cannot be accessed")
 		return true
 	}
 	ok := true
@@ -160,6 +162,70 @@ func validateAuth(ctx context.Context, log *slog.Logger, auth *github.Auth) bool
 		}
 	}
 	return ok
+}
+
+// pollTargets builds the poll list from the configured repos.
+func pollTargets(cfg *config.Config) []watcher.Target {
+	targets := make([]watcher.Target, 0, len(cfg.Repos))
+	for _, r := range cfg.Repos {
+		repo, err := provider.ParseRepo(r.Upstream) // validated in config
+		if err != nil {
+			continue
+		}
+		kind := provider.KindRelease
+		if r.Watch == config.WatchTags {
+			kind = provider.KindTag
+		}
+		targets = append(targets, watcher.Target{
+			Provider:           github.Name,
+			Repo:               repo,
+			Kind:               kind,
+			IncludePrereleases: cfg.WantsPrereleases(r),
+		})
+	}
+	return targets
+}
+
+// newPoller wires the GitHub ref lister to the configured poll auth.
+func newPoller(cfg *config.Config, auth *github.Auth, st watcher.Store, log *slog.Logger) *watcher.Poller {
+	token := func(ctx context.Context, repo provider.Repo) (credentials.Secret, error) {
+		name := cfg.PollAuthProfile(repo.FullName())
+		if name == "" {
+			return credentials.Secret{}, nil // anonymous
+		}
+		src := auth.Profile(name)
+		if src == nil {
+			return credentials.Secret{}, fmt.Errorf("auth profile %q does not exist", name)
+		}
+		return src.Token(ctx, repo)
+	}
+	listers := map[string]provider.RefLister{github.Name: github.NewRefs(cfg.GitHub.APIURL, token, nil)}
+	p := watcher.New(st, listers, pollTargets(cfg), log)
+	p.Interval = cfg.Watcher.PollInterval
+	return p
+}
+
+// warnAnonymousQuota warns when anonymous polling would exceed GitHub's
+// 60 requests/hour limit for unauthenticated clients.
+func warnAnonymousQuota(cfg *config.Config, log *slog.Logger) {
+	perHour := 0.0
+	polls := float64(time.Hour) / float64(cfg.Watcher.PollInterval)
+	for _, r := range cfg.Repos {
+		if cfg.PollAuthProfile(r.Upstream) != "" {
+			continue
+		}
+		reqs := 1.0
+		if r.Watch == config.WatchTags {
+			reqs = 3 // up to maxTagPages
+		}
+		perHour += reqs * polls
+	}
+	if perHour > 0 {
+		log.Info("polling some upstreams anonymously", "requests_per_hour", int(perHour))
+	}
+	if perHour > 50 {
+		log.Warn("anonymous polling may exceed GitHub's 60 requests/hour limit; configure a PAT and set watcher.auth, or raise watcher.poll_interval")
+	}
 }
 
 // check validates the config and credentials, then exits. Use it after
@@ -200,9 +266,6 @@ func serve() error {
 	auditCredentials(ctx, log, creds, cfg.CredentialNames())
 	validateAuth(ctx, log, auth)
 
-	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
 	db, err := store.Open(ctx, cfg.Database.Path)
 	if err != nil {
 		return err
@@ -216,8 +279,8 @@ func serve() error {
 
 	// Later milestones replace this with license checks and merges.
 	w := worker.New(db, func(ctx context.Context, ev provider.Event) error {
-		log.Info("event received", "kind", ev.Kind, "repo", ev.Repo.FullName(),
-			"tag", ev.Tag, "prerelease", ev.Prerelease, "delivery", ev.DeliveryID)
+		log.Info("event received", "kind", ev.Kind, "repo", ev.Repo.FullName(), "tag", ev.Tag,
+			"prerelease", ev.Prerelease, "source", ev.Source, "delivery", ev.DeliveryID)
 		return nil
 	}, log.With("component", "worker"))
 
@@ -259,6 +322,15 @@ func serve() error {
 	}()
 	go watchCredentials(ctx, log, cfg, creds, auth)
 
+	warnAnonymousQuota(cfg, log)
+	poller := newPoller(cfg, auth, db, log.With("component", "watcher"))
+	poller.OnQueued = w.Wake
+	pollerDone := make(chan struct{})
+	go func() {
+		defer close(pollerDone)
+		poller.Run(ctx)
+	}()
+
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
 		go func() {
@@ -282,6 +354,7 @@ func serve() error {
 		_ = s.Shutdown(shutdownCtx)
 	}
 	<-workerDone
+	<-pollerDone
 	return runErr
 }
 
