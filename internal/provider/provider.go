@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -112,6 +114,24 @@ func (e *RateLimitError) Error() string {
 	return "API rate limit exceeded until " + e.Reset.Format(time.RFC3339)
 }
 
+// ErrRefNotFound means the repo or ref does not exist (or isn't visible).
+var ErrRefNotFound = errors.New("repo or ref not found")
+
+// ArchiveFetcher downloads a repo's source at a ref.
+type ArchiveFetcher interface {
+	// Archive returns a gzipped tarball whose entries sit under one
+	// top-level directory. The caller closes it.
+	Archive(ctx context.Context, repo Repo, ref string) (io.ReadCloser, error)
+}
+
+// LooksLikePrerelease guesses from a tag name whether it is a pre-release,
+// for tags that have no release metadata ("v2.0.0-rc1", "1.0b2").
+func LooksLikePrerelease(tag string) bool {
+	return prereleaseTag.MatchString(strings.ToLower(tag))
+}
+
+var prereleaseTag = regexp.MustCompile(`(?:^|[-._0-9])(?:alpha|beta|rc|pre|preview|dev|snapshot|nightly|a|b)\.?[0-9]*$`)
+
 // RefLister lists an upstream repo's releases or tags for polling.
 type RefLister interface {
 	// ListReleases returns recent published releases. When etag matches,
@@ -141,4 +161,69 @@ type WebhookParser interface {
 	// ParseWebhook verifies the delivery and returns the normalized event.
 	// Events Fork Keeper does not act on return Kind == KindIgnored and a nil error.
 	ParseWebhook(header http.Header, body []byte) (Event, error)
+}
+
+// CompareVersions orders tag names like version numbers: a leading "v" is
+// ignored and digit runs compare numerically, so "v1.10.0" > "v1.9.2".
+// A pre-release suffix sorts before its release ("1.0.0-rc1" < "1.0.0").
+func CompareVersions(a, b string) int {
+	a, b = strings.TrimPrefix(strings.ToLower(a), "v"), strings.TrimPrefix(strings.ToLower(b), "v")
+	for a != "" && b != "" {
+		ca, ra := versionChunk(a)
+		cb, rb := versionChunk(b)
+		if c := compareChunk(ca, cb); c != 0 {
+			return c
+		}
+		a, b = ra, rb
+	}
+	switch {
+	case a == b:
+		return 0
+	case a == "":
+		// "1.0" vs "1.0-rc1": the longer one is a pre-release if its
+		// remainder starts with a separator and a letter.
+		if isPrereleaseSuffix(b) {
+			return 1
+		}
+		return -1
+	default:
+		if isPrereleaseSuffix(a) {
+			return -1
+		}
+		return 1
+	}
+}
+
+func versionChunk(s string) (chunk, rest string) {
+	isDigit := s[0] >= '0' && s[0] <= '9'
+	i := 1
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9') == isDigit {
+		i++
+	}
+	return s[:i], s[i:]
+}
+
+func compareChunk(a, b string) int {
+	aNum, bNum := a[0] >= '0' && a[0] <= '9', b[0] >= '0' && b[0] <= '9'
+	switch {
+	case aNum && bNum:
+		a, b = strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+		if len(a) != len(b) {
+			if len(a) < len(b) {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a, b)
+	case aNum:
+		return 1 // "1.0.1" > "1.0-rc"
+	case bNum:
+		return -1
+	}
+	return strings.Compare(a, b)
+}
+
+func isPrereleaseSuffix(s string) bool {
+	s = strings.TrimLeft(s, "-._+")
+	return s != "" && s[0] >= 'a' && s[0] <= 'z'
 }

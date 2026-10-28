@@ -60,7 +60,7 @@ license:
     - name: relicense-to-source-available
       scope: global
       from: [MIT, Apache-2.0]
-      to: [BSL-1.1, SSPL-1.0, Elastic-2.0]
+      to: [BUSL-1.1, SSPL-1.0, Elastic-2.0]
       actions: [freeze, archive, notify]
     - name: gpl2-to-gpl3
       scope: global

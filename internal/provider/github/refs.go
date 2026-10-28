@@ -117,7 +117,11 @@ func (r *Refs) ListTags(ctx context.Context, repo provider.Repo) (provider.RefLi
 			return list, err
 		}
 		for _, t := range tags {
-			list.Refs = append(list.Refs, provider.Ref{Kind: provider.KindTag, Name: t.Name})
+			list.Refs = append(list.Refs, provider.Ref{
+				Kind:       provider.KindTag,
+				Name:       t.Name,
+				Prerelease: provider.LooksLikePrerelease(t.Name),
+			})
 		}
 		if len(tags) < tagsPerPage {
 			break

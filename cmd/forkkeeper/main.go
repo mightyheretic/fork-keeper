@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
+	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -44,12 +46,14 @@ func main() {
 		os.Exit(check())
 	case "poll":
 		os.Exit(pollCmd(os.Args[2:]))
+	case "license":
+		os.Exit(licenseCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -187,8 +191,10 @@ func pollTargets(cfg *config.Config) []watcher.Target {
 }
 
 // newPoller wires the GitHub ref lister to the configured poll auth.
-func newPoller(cfg *config.Config, auth *github.Auth, st watcher.Store, log *slog.Logger) *watcher.Poller {
-	token := func(ctx context.Context, repo provider.Repo) (credentials.Secret, error) {
+// upstreamToken returns tokens for reading upstream repos, using the poll
+// auth profile (or anonymous access).
+func upstreamToken(cfg *config.Config, auth *github.Auth) github.TokenFunc {
+	return func(ctx context.Context, repo provider.Repo) (credentials.Secret, error) {
 		name := cfg.PollAuthProfile(repo.FullName())
 		if name == "" {
 			return credentials.Secret{}, nil // anonymous
@@ -199,7 +205,10 @@ func newPoller(cfg *config.Config, auth *github.Auth, st watcher.Store, log *slo
 		}
 		return src.Token(ctx, repo)
 	}
-	listers := map[string]provider.RefLister{github.Name: github.NewRefs(cfg.GitHub.APIURL, token, nil)}
+}
+
+func newPoller(cfg *config.Config, auth *github.Auth, st watcher.Store, log *slog.Logger) *watcher.Poller {
+	listers := map[string]provider.RefLister{github.Name: github.NewRefs(cfg.GitHub.APIURL, upstreamToken(cfg, auth), nil)}
 	p := watcher.New(st, listers, pollTargets(cfg), log)
 	p.Interval = cfg.Watcher.PollInterval
 	return p
@@ -225,6 +234,43 @@ func warnAnonymousQuota(cfg *config.Config, log *slog.Logger) {
 	}
 	if perHour > 50 {
 		log.Warn("anonymous polling may exceed GitHub's 60 requests/hour limit; configure a PAT and set watcher.auth, or raise watcher.poll_interval")
+	}
+}
+
+// processor handles queued events. For now that is the license gate; the
+// rule engine and merge engine plug in after it in later milestones.
+func processor(cfg *config.Config, g *gate.Gate, log *slog.Logger) worker.Processor {
+	upstreams := map[string]bool{}
+	for _, r := range cfg.Repos {
+		upstreams[strings.ToLower(r.Upstream)] = true
+	}
+	return func(ctx context.Context, ev provider.Event) error {
+		log := log.With("repo", ev.Repo.FullName(), "tag", ev.Tag, "source", ev.Source, "delivery", ev.DeliveryID)
+		if ev.Kind != provider.KindRelease && ev.Kind != provider.KindTag {
+			return nil
+		}
+		if !upstreams[strings.ToLower(ev.Repo.FullName())] {
+			log.Info("ignoring event for a repo that isn't a configured upstream")
+			return nil
+		}
+		res, err := g.Check(ctx, ev)
+		if errors.Is(err, provider.ErrRefNotFound) {
+			return worker.Permanent(err)
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case res.Diff == nil:
+			log.Info("license baseline recorded", "declared", res.Report.Declared)
+		case res.Diff.Changed:
+			log.Warn("LICENSE CHANGE DETECTED", "previous", res.Previous, "summary", res.Diff.Summary(),
+				"old_declared", res.Diff.OldDeclared, "new_declared", res.Diff.NewDeclared,
+				"added", res.Diff.Added, "removed", res.Diff.Removed)
+		default:
+			log.Info("license unchanged", "previous", res.Previous, "declared", res.Report.Declared)
+		}
+		return nil
 	}
 }
 
@@ -277,12 +323,10 @@ func serve() error {
 		log.Warn("requeued deliveries interrupted by previous shutdown", "count", n)
 	}
 
-	// Later milestones replace this with license checks and merges.
-	w := worker.New(db, func(ctx context.Context, ev provider.Event) error {
-		log.Info("event received", "kind", ev.Kind, "repo", ev.Repo.FullName(), "tag", ev.Tag,
-			"prerelease", ev.Prerelease, "source", ev.Source, "delivery", ev.DeliveryID)
-		return nil
-	}, log.With("component", "worker"))
+	licenseGate := gate.New(db, map[string]provider.ArchiveFetcher{
+		github.Name: github.NewArchives(cfg.GitHub.APIURL, upstreamToken(cfg, auth)),
+	}, log.With("component", "gate"))
+	w := worker.New(db, processor(cfg, licenseGate, log), log.With("component", "worker"))
 
 	webhookSecret := func() ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
