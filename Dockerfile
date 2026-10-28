@@ -5,7 +5,7 @@ FROM golang:1.26-alpine AS build
 WORKDIR /src
 
 # Cache module downloads separately from source changes.
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
