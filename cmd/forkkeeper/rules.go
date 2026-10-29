@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"os/user"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -21,13 +20,22 @@ import (
 )
 
 const rulesUsage = `usage:
+  forkkeeper rules list [owner/repo]
   forkkeeper rules test <owner/repo> <old-ref> <new-ref>
 
-Downloads both versions, diffs their licenses and shows which rule would
-fire and what it would do. Nothing is recorded or frozen.`
+list shows the license rules (for one repo: the ones that apply to it), in
+the order they win. Rules live in the config file (license.rules), so they
+are reviewed and versioned like the rest of it; edit it and restart.
 
-// rulesCmd dry-runs the rule engine against two real versions.
+test downloads both versions, diffs their licenses and shows which rule
+would fire and what it would do. Nothing is recorded or frozen.`
+
+// rulesCmd lists the rules, or dry-runs the rule engine against two real
+// versions.
 func rulesCmd(args []string) int {
+	if len(args) >= 1 && len(args) <= 2 && args[0] == "list" {
+		return rulesList(args[1:])
+	}
 	if len(args) != 4 || args[0] != "test" {
 		fmt.Fprintln(os.Stderr, rulesUsage)
 		return 2
@@ -63,6 +71,54 @@ func rulesCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "note: %s is not in repos:, so only global rules apply\n", args[1])
 	}
 	writeDecision(os.Stdout, diff, rules.New(cfg).Evaluate(args[1], diff))
+	return 0
+}
+
+func rulesList(args []string) int {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid config:", err)
+		return 1
+	}
+	repo := ""
+	if len(args) == 1 {
+		repo = args[0]
+		if _, ok := cfg.RepoFor(repo); !ok {
+			fmt.Fprintf(os.Stderr, "note: %s is not in repos:, so only global rules apply\n", repo)
+		}
+	}
+	e := rules.New(cfg)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "#\tRULE\tSCOPE\tFROM\tTO\tREMOVED\tACTIONS")
+	list := func(v []string) string { return orDash(strings.Join(v, ", ")) }
+	for i, r := range e.RulesFor(repo) {
+		scope := r.Scope
+		switch {
+		case len(r.Repos) > 0:
+			scope += " (" + strings.Join(r.Repos, ", ") + ")"
+		case len(r.Groups) > 0:
+			scope += " (" + strings.Join(r.Groups, ", ") + ")"
+		}
+		if r.Priority != 0 {
+			scope += fmt.Sprintf(", priority %d", r.Priority)
+		}
+		from := r.From
+		if len(from) == 0 {
+			from = []string{"any"}
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", i+1, r.Name, scope, list(from), list(r.To), list(r.Removed),
+			list(r.Actions))
+	}
+	tw.Flush()
+	defaults, escalation := e.Defaults()
+	fmt.Printf("\nNo rule matched:          %s\n", list(defaults))
+	fmt.Printf("Sub-license escalation:  %s\n", list(escalation))
+	fmt.Printf("Allowlist:               %s\n", list(cfg.License.Allowlist))
+	if repo != "" {
+		if r, ok := cfg.RepoFor(repo); ok {
+			fmt.Printf("Sub-licenses (%s):  %s\n", repo, r.SubLicenses)
+		}
+	}
 	return 0
 }
 
@@ -193,11 +249,7 @@ func unfreezeCmd(args []string) int {
 	}
 	defer db.Close()
 
-	actor := "cli"
-	if u, err := user.Current(); err == nil {
-		actor = "cli:" + u.Username
-	}
-	ok, err := db.Unfreeze(ctx, github.Name, repo, actor, *reason)
+	ok, err := db.Unfreeze(ctx, github.Name, repo, cliActor(), *reason)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

@@ -16,6 +16,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/merge"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -28,6 +29,13 @@ type Store interface {
 	Freeze(ctx context.Context, provider, repo, ref, reason string, decisionID int64) (bool, error)
 	RepoState(ctx context.Context, provider, repo string) (store.RepoState, error)
 	CompletePending(ctx context.Context, decisionID int64, action string) error
+	SaveApproval(ctx context.Context, key store.RefKey, decisionID int64, kind string) (store.Approval, error)
+	PendingApprovals(ctx context.Context, provider, repo string) ([]store.Approval, error)
+}
+
+// Notifier queues notifications.
+type Notifier interface {
+	Notify(ctx context.Context, n notify.Notice) (bool, error)
 }
 
 // Checker runs the license gate.
@@ -57,6 +65,8 @@ type Pipeline struct {
 	ForceSync bool
 	// Archiver backs up releases; nil disables backups.
 	Archiver Archiver
+	// Notify queues notifications; nil disables them.
+	Notify Notifier
 }
 
 // New returns a pipeline. syncer may be nil to only check licenses.
@@ -72,6 +82,11 @@ type Outcome struct {
 	// NewlyFrozen is true when this event froze the repo.
 	NewlyFrozen bool
 	State       store.RepoState
+	// Approval is set when the version needs a human decision.
+	Approval *store.Approval
+	// Waiting lists earlier versions still waiting for approval; until
+	// they are approved, this version needs approval too.
+	Waiting []store.Approval
 	// Backup is set when a source backup ran.
 	Backup *archive.Result
 	// Sync is set when the merge engine ran.
@@ -135,6 +150,23 @@ func (p *Pipeline) Run(ctx context.Context, ev provider.Event) (Outcome, error) 
 	if err != nil {
 		return out, err
 	}
+	key := store.RefKey{Provider: ev.Provider, Repo: repo, Ref: ev.Tag}
+	if kind := approvalKind(d); kind != "" {
+		a, err := p.store.SaveApproval(ctx, key, id, kind)
+		if err != nil {
+			return out, err
+		}
+		out.Approval = &a
+	}
+	pendingApprovals, err := p.store.PendingApprovals(ctx, ev.Provider, repo)
+	if err != nil {
+		return out, err
+	}
+	for _, a := range pendingApprovals {
+		if a.Ref != ev.Tag {
+			out.Waiting = append(out.Waiting, a)
+		}
+	}
 
 	if d.Has(config.ActionFreeze) {
 		// The last good version is the one before this change. For a
@@ -173,30 +205,71 @@ func (p *Pipeline) Run(ctx context.Context, ev provider.Event) (Outcome, error) 
 	// Back up before syncing: protecting the source matters most. A
 	// failed backup is retried with the event; the sync is idempotent.
 	backupErr := p.backup(ctx, log, ev, repoCfg, res, id, &out)
+	syncErr := p.sync(ctx, log, ev, repoCfg, res, &out)
+	p.notify(ctx, log, ev, id, &out)
+	return out, errors.Join(backupErr, syncErr)
+}
 
+func (p *Pipeline) sync(ctx context.Context, log *slog.Logger, ev provider.Event, repoCfg config.Repo, res gate.Result,
+	out *Outcome) error {
 	if repoCfg.Fork == "" || p.syncer == nil {
-		return out, backupErr
+		return nil
 	}
 	if out.State.Frozen {
 		log.Info("not syncing the fork: repo is frozen", "frozen_at", out.State.FrozenRef)
-		return out, backupErr
+		return nil
 	}
 	fork, err := provider.ParseRepo(repoCfg.Fork)
 	if err != nil {
-		return out, worker.Permanent(err)
+		return worker.Permanent(err)
 	}
-	req := SyncRequest(ev, fork, repoCfg, res, d)
+	req := SyncRequest(ev, fork, repoCfg, res, effectiveDecision(out))
 	req.Force = p.ForceSync
 	sync, err := p.syncer.Sync(ctx, req)
 	if errors.Is(err, provider.ErrRefNotFound) || errors.Is(err, merge.ErrNoCommonHistory) {
-		return out, errors.Join(backupErr, worker.Permanent(err))
+		return worker.Permanent(err)
 	}
 	if err != nil {
-		return out, errors.Join(backupErr, fmt.Errorf("sync %s: %w", repoCfg.Fork, err))
+		return fmt.Errorf("sync %s: %w", repoCfg.Fork, err)
 	}
 	out.Sync = &sync
 	logSync(log, sync)
-	return out, backupErr
+	return nil
+}
+
+// approvalKind is the kind of approval a decision needs, or "".
+func approvalKind(d rules.Decision) string {
+	switch d.MergePolicy {
+	case rules.MergeBlocked:
+		return store.ApprovalOverride
+	case rules.MergeApproval:
+		return store.ApprovalNeeded
+	}
+	return ""
+}
+
+// effectiveDecision is the decision the merge engine works with. An
+// approved version merges like any other; a version that arrives while an
+// earlier one is still waiting for approval waits too, since it carries
+// the same change.
+func effectiveDecision(out *Outcome) rules.Decision {
+	d := out.Decision
+	if a := out.Approval; a != nil && a.Status == store.ApprovalApproved {
+		d.MergePolicy = rules.MergeAuto
+	}
+	for _, w := range out.Waiting {
+		policy := rules.MergeApproval
+		if w.Kind == store.ApprovalOverride {
+			policy = rules.MergeBlocked
+		}
+		if d.MergePolicy == rules.MergeAuto || policy == rules.MergeBlocked && d.MergePolicy == rules.MergeApproval {
+			d.MergePolicy = policy
+		}
+	}
+	if d.MergePolicy != out.Decision.MergePolicy && len(out.Waiting) > 0 && d.Rule == "" {
+		d.Reason = fmt.Sprintf("an earlier version (%s) is still waiting for approval #%d", out.Waiting[0].Ref, out.Waiting[0].ID)
+	}
+	return d
 }
 
 // backup backs up the source of the new release if the archive policy

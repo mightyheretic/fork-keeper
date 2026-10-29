@@ -348,3 +348,40 @@ func union(sets ...[]string) []string {
 	slices.Sort(out)
 	return out
 }
+
+// Listed is a rule as it applies to one repo.
+type Listed struct {
+	config.Rule
+	Scope string
+}
+
+// RulesFor lists the rules that apply to repo ("" for every rule), in the
+// order they win: most specific scope, then priority, then file order.
+func (e *Engine) RulesFor(repo string) []Listed {
+	var rs []rule
+	for _, r := range e.rules {
+		if repo == "" || e.inScope(r, repo) {
+			rs = append(rs, r)
+		}
+	}
+	slices.SortStableFunc(rs, func(a, b rule) int {
+		switch {
+		case beats(a, b):
+			return -1
+		case beats(b, a):
+			return 1
+		}
+		return 0
+	})
+	out := make([]Listed, len(rs))
+	for i, r := range rs {
+		out[i] = Listed{Rule: r.Rule, Scope: r.scope}
+	}
+	return out
+}
+
+// Defaults returns the default actions (licenses changed, no rule matched)
+// and the sub-license escalation actions.
+func (e *Engine) Defaults() (defaults, escalation []string) {
+	return slices.Clone(e.defaults), slices.Clone(e.escalate)
+}

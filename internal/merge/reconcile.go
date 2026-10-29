@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -18,6 +19,21 @@ import (
 type ReconcileStore interface {
 	OpenSyncs(ctx context.Context) ([]store.Sync, error)
 	UpdateSyncStatus(ctx context.Context, id int64, status, detail string) error
+	RepoState(ctx context.Context, provider, repo string) (store.RepoState, error)
+}
+
+// ApprovalHook resolves approvals from sync PRs.
+type ApprovalHook interface {
+	// ApplyPending retries approvals whose effect on a PR failed earlier.
+	ApplyPending(ctx context.Context) error
+	// CheckPR resolves approvals from a PR (merged by hand, or labeled
+	// approved) and reports whether it changed anything.
+	CheckPR(ctx context.Context, s store.Sync, pr *provider.PullRequest) (bool, error)
+}
+
+// Notifier queues notifications.
+type Notifier interface {
+	Notify(ctx context.Context, n notify.Notice) (bool, error)
 }
 
 // Reconciler follows open sync PRs: it notices when they are merged or
@@ -32,6 +48,10 @@ type Reconciler struct {
 	// least one check has reported.
 	AutoMerge bool
 	RequireCI bool
+	// Approvals, if set, resolves approvals from PRs.
+	Approvals ApprovalHook
+	// Notify, if set, is told about CI failures.
+	Notify Notifier
 }
 
 // NewReconciler returns a reconciler with auto-merge on and CI required.
@@ -62,6 +82,11 @@ func (r *Reconciler) Once(ctx context.Context) error {
 		return err
 	}
 	var errs []error
+	if r.Approvals != nil {
+		if err := r.Approvals.ApplyPending(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for _, s := range syncs {
 		if err := r.check(ctx, s); err != nil {
 			errs = append(errs, fmt.Errorf("%s PR #%d: %w", s.Fork, s.PRNumber, err))
@@ -94,6 +119,15 @@ func (r *Reconciler) check(ctx context.Context, s store.Sync) error {
 	if err != nil {
 		return err
 	}
+	if r.Approvals != nil {
+		changed, err := r.Approvals.CheckPR(ctx, s, pr)
+		if err != nil {
+			return err
+		}
+		if changed && !pr.Merged {
+			return nil // the PR changed; look again next round
+		}
+	}
 	switch {
 	case pr.Merged:
 		log.Info("sync PR merged")
@@ -105,6 +139,11 @@ func (r *Reconciler) check(ctx context.Context, s store.Sync) error {
 
 	if !r.AutoMerge || s.MergePolicy != string(rules.MergeAuto) {
 		return nil
+	}
+	if state, err := r.store.RepoState(ctx, s.Provider, s.Repo); err != nil {
+		return err
+	} else if state.Frozen {
+		return setDetail(s.Status, "repo is frozen; not merging automatically (merge by hand to take this version)")
 	}
 	switch {
 	case pr.Draft:
@@ -124,8 +163,12 @@ func (r *Reconciler) check(ctx context.Context, s store.Sync) error {
 	case provider.CIPending:
 		return setDetail(s.Status, "waiting for CI")
 	case provider.CIFailure:
-		log.Warn("CI failed on sync PR; not merging", "failed", ci.Failed)
-		return setDetail(s.Status, "CI failed: "+strings.Join(ci.Failed, ", "))
+		detail := "CI failed: " + strings.Join(ci.Failed, ", ")
+		if detail != s.Detail {
+			log.Warn("CI failed on sync PR; not merging", "failed", ci.Failed)
+			r.notifyCI(ctx, log, s, pr, ci)
+		}
+		return setDetail(s.Status, detail)
 	case provider.CINone:
 		if r.RequireCI {
 			return setDetail(s.Status, "waiting for CI (no checks reported yet)")
@@ -142,4 +185,24 @@ func (r *Reconciler) check(ctx context.Context, s store.Sync) error {
 	}
 	log.Info("sync PR auto-merged", "checks", ci.Total)
 	return setDetail(store.SyncMerged, detail)
+}
+
+func (r *Reconciler) notifyCI(ctx context.Context, log *slog.Logger, s store.Sync, pr *provider.PullRequest, ci provider.CIStatus) {
+	if r.Notify == nil {
+		return
+	}
+	_, err := r.Notify.Notify(ctx, notify.Notice{
+		Key:      fmt.Sprintf("ci:%s/%s#%d@%s", s.Provider, s.Fork, s.PRNumber, pr.HeadSHA),
+		Provider: s.Provider,
+		Message: notify.Message{Kind: notify.KindSync, Repo: s.Repo, Ref: s.Ref, Priority: notify.PriorityDefault,
+			Tags:  []string{"x"},
+			Title: fmt.Sprintf("CI failed on the %s %s sync PR", s.Repo, s.Ref),
+			Body: fmt.Sprintf("CI failed on %s PR #%d (upstream %s %s): %s.\n\nFork Keeper won't merge it until CI passes. "+
+				"Fix it on the PR, or wait for the next upstream release.", s.Fork, s.PRNumber, s.Repo, s.Ref,
+				strings.Join(ci.Failed, ", ")),
+			Click: pr.URL, Links: []notify.Link{{Label: "Open PR", URL: pr.URL}}},
+	})
+	if err != nil {
+		log.Warn("could not queue CI failure notification", "err", err)
+	}
 }

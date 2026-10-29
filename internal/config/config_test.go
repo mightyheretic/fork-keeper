@@ -307,3 +307,58 @@ repos:
 		}
 	}
 }
+
+func TestNotificationsConfig(t *testing.T) {
+	cfg, err := Parse([]byte(`
+credentials: {provider: env}
+notifications:
+  ntfy:
+    url: https://ntfy.sh/fk-alerts
+    token: ntfy_token
+  gotify:
+    url: http://100.101.102.103:8080
+    token: gotify_token
+  email:
+    smtp: smtp.example.com:587
+    username: me
+    password: smtp_password
+    from: Fork Keeper <fk@example.com>
+    to: [me@example.com]
+  remind_after: 48h
+  sync_problems: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := cfg.Notifications
+	if !n.Enabled() || n.Reminders() != 48*time.Hour || n.NotifySyncProblems() || !n.NotifyApprovals() {
+		t.Fatalf("notifications = %+v", n)
+	}
+	names := cfg.CredentialNames()
+	for _, want := range []string{"ntfy_token", "gotify_token", "smtp_password"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("credential names %v missing %s", names, want)
+		}
+	}
+	if (Notifications{}).Reminders() != DefaultRemindAfter {
+		t.Error("default reminder interval")
+	}
+
+	for _, bad := range []string{
+		"ntfy: {url: http://ntfy.example.com/topic}",                // http over the internet
+		"ntfy: {url: https://ntfy.sh/}",                             // no topic
+		"ntfy: {url: 'https://me:pw@ntfy.sh/topic'}",                // credentials in the URL
+		"gotify: {url: https://gotify.example.com}",                 // no token
+		"email: {smtp: smtp.example.com, from: a@b.c, to: [d@e.f]}", // no port
+		"email: {smtp: 'smtp.example.com:587', from: a@b.c, to: []}",
+		"webhook: {url: https://example.com/hook, token: '../x'}",
+		"remind_after: 5m",
+	} {
+		if _, err := Parse([]byte("credentials: {provider: env}\nnotifications:\n  " + bad + "\n")); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+	if _, err := Parse([]byte("credentials: {provider: env}\nnotifications:\n  webhook: {url: 'http://127.0.0.1:9000/hook'}\n")); err != nil {
+		t.Errorf("loopback http rejected: %v", err)
+	}
+}

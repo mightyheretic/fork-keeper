@@ -248,25 +248,27 @@ func (s *Store) RecordMainWatchError(ctx context.Context, providerName, repo str
 
 // CompletePending removes action from a decision's pending list.
 func (s *Store) CompletePending(ctx context.Context, decisionID int64, action string) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		var raw string
-		err := tx.QueryRowContext(ctx, `SELECT pending FROM license_decisions WHERE id = ?`, decisionID).Scan(&raw)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read pending actions: %w", err)
-		}
-		var pending []string
-		_ = json.Unmarshal([]byte(raw), &pending)
-		pending = slices.DeleteFunc(pending, func(a string) bool { return a == action })
-		if pending == nil {
-			pending = []string{}
-		}
-		b, _ := json.Marshal(pending)
-		_, err = tx.ExecContext(ctx, `UPDATE license_decisions SET pending = ? WHERE id = ?`, string(b), decisionID)
-		return err
-	})
+	return s.inTx(ctx, func(tx *sql.Tx) error { return completePendingTx(ctx, tx, decisionID, action) })
+}
+
+func completePendingTx(ctx context.Context, tx *sql.Tx, decisionID int64, actions ...string) error {
+	var raw string
+	err := tx.QueryRowContext(ctx, `SELECT pending FROM license_decisions WHERE id = ?`, decisionID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read pending actions: %w", err)
+	}
+	var pending []string
+	_ = json.Unmarshal([]byte(raw), &pending)
+	pending = slices.DeleteFunc(pending, func(a string) bool { return slices.Contains(actions, a) })
+	if pending == nil {
+		pending = []string{}
+	}
+	b, _ := json.Marshal(pending)
+	_, err = tx.ExecContext(ctx, `UPDATE license_decisions SET pending = ? WHERE id = ?`, string(b), decisionID)
+	return err
 }
 
 // LatestRef returns the newest non-prerelease ref of kind seen for repo.

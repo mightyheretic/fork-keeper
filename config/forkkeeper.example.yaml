@@ -77,9 +77,28 @@ archive:
   #     username: your-user    # default x-access-token (GitHub); GitLab: oauth2
   #     refs: hidden           # hidden (default) | tags (dedicated backup repo)
 
+# Where messages go: license warnings, approvals (with reminders), and sync
+# problems. Configure any of these; each message goes to all of them. URLs
+# must be https://, except localhost and private or Tailscale addresses.
 notifications:
   ntfy:
-    url: https://ntfy.sh/your-topic
+    url: https://ntfy.sh/your-secret-topic   # topic URL; anyone with the topic can read it
+    # token: ntfy_token                      # optional credential name (access token)
+  # gotify:
+  #   url: https://gotify.example.com
+  #   token: gotify_token                    # application token (credential name)
+  # email:
+  #   smtp: smtp.example.com:587             # STARTTLS required; port 465 for implicit TLS
+  #   username: you@example.com
+  #   password: smtp_password                # credential name
+  #   from: Fork Keeper <forkkeeper@example.com>
+  #   to: [you@example.com]
+  # webhook:                                 # POSTs each message as JSON
+  #   url: https://example.com/hooks/forkkeeper
+  #   token: webhook_token                   # optional, sent as a bearer token
+  approvals: true      # notify approvals even when the rule has no notify action
+  remind_after: 72h    # remind about pending approvals; 0 turns reminders off
+  sync_problems: true  # merge conflicts, CI failures on sync PRs
 
 # What to do when an upstream's licenses change between versions.
 # Rules run when the project's own (top-level) license changes: the declared

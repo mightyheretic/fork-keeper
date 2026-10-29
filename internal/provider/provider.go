@@ -242,6 +242,7 @@ type GitRemote interface {
 // PullRequest is an open or closed pull (merge) request.
 type PullRequest struct {
 	Number  int
+	NodeID  string
 	URL     string
 	State   string // "open" or "closed"
 	Merged  bool
@@ -293,6 +294,12 @@ type ForkHost interface {
 	CIStatus(ctx context.Context, repo Repo, sha string) (CIStatus, error)
 	// MergePullRequest merges with a merge commit, only if head is still sha.
 	MergePullRequest(ctx context.Context, repo Repo, number int, sha, title string) error
+	// RemoveLabel removes a label; one that isn't there is not an error.
+	RemoveLabel(ctx context.Context, repo Repo, number int, label string) error
+	// MarkReadyForReview turns a draft PR into a regular one.
+	MarkReadyForReview(ctx context.Context, repo Repo, number int) error
+	Comment(ctx context.Context, repo Repo, number int, body string) error
+	ClosePullRequest(ctx context.Context, repo Repo, number int) error
 }
 
 // BranchHead is the head commit of a repo's default branch.

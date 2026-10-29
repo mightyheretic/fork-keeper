@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mightyheretic/fork-keeper/internal/approval"
 	"github.com/mightyheretic/fork-keeper/internal/archive"
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
@@ -22,6 +23,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/git"
 	"github.com/mightyheretic/fork-keeper/internal/mainwatch"
 	"github.com/mightyheretic/fork-keeper/internal/merge"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/pipeline"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
@@ -70,12 +72,24 @@ func main() {
 		os.Exit(archiveCmd(os.Args[2:]))
 	case "main":
 		os.Exit(mainCmd(os.Args[2:]))
+	case "approvals":
+		os.Exit(approvalsCmd(os.Args[2:]))
+	case "approve":
+		os.Exit(approveCmd(os.Args[2:], true))
+	case "reject":
+		os.Exit(approveCmd(os.Args[2:], false))
+	case "freeze":
+		os.Exit(freezeCmd(os.Args[2:]))
+	case "audit":
+		os.Exit(auditCmd(os.Args[2:]))
+	case "notify":
+		os.Exit(notifyCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, sync, fork, archive, main, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, approvals, approve, reject, freeze, unfreeze, audit, sync, fork, archive, main, notify, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -260,6 +274,14 @@ func newGitRunner(cfg *config.Config) (*git.Runner, error) {
 	return &git.Runner{Home: home, Identity: git.Identity{Name: cfg.Merge.CommitterName, Email: cfg.Merge.CommitterEmail}}, nil
 }
 
+// watchKind is how a repo's upstream versions are watched.
+func watchKind(r config.Repo) provider.EventKind {
+	if r.Watch == config.WatchTags {
+		return provider.KindTag
+	}
+	return provider.KindRelease
+}
+
 // newArchiver returns the source backup archiver. Backups live under
 // <data_dir>/archive.
 func newArchiver(cfg *config.Config, auth *github.Auth, creds credentials.Provider, st archive.Store, log *slog.Logger) (*archive.Archiver, error) {
@@ -287,11 +309,7 @@ func mainTargets(cfg *config.Config) []mainwatch.Target {
 		if err != nil {
 			continue
 		}
-		kind := provider.KindRelease
-		if r.Watch == config.WatchTags {
-			kind = provider.KindTag
-		}
-		out = append(out, mainwatch.Target{Provider: github.Name, Repo: repo, Kind: kind, Config: r})
+		out = append(out, mainwatch.Target{Provider: github.Name, Repo: repo, Kind: watchKind(r), Config: r})
 	}
 	return out
 }
@@ -455,10 +473,19 @@ func serve() error {
 		log.Error("git is not installed; source backups are off", "err", err)
 		archiver = nil
 	}
+	queue := notify.NewQueue(db, cfg.Notifications)
+	sender := notify.NewSender(db, queue, notify.Channels(cfg.Notifications, creds, nil), cfg.Notifications,
+		log.With("component", "notify"))
+	if !cfg.Notifications.Enabled() {
+		log.Warn("no notification channels configured (notifications:); license warnings and approvals are only logged " +
+			"and shown by forkkeeper status and forkkeeper approvals")
+	}
+
 	pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, syncer, log.With("component", "pipeline"))
 	if archiver != nil {
 		pipe.Archiver = archiver
 	}
+	pipe.Notify = queue
 	w := worker.New(db, pipe.Process, log.With("component", "worker"))
 
 	webhookSecret := func() ([]byte, error) {
@@ -513,6 +540,7 @@ func serve() error {
 		mainArchiver = archiver
 	}
 	mainWatcher := newMainWatcher(cfg, auth, db, licenseGate, mainArchiver, log.With("component", "mainwatch"))
+	mainWatcher.Notify = queue
 	mainDone := make(chan struct{})
 	go func() {
 		defer close(mainDone)
@@ -528,7 +556,16 @@ func serve() error {
 		r := merge.NewReconciler(hosts, db, log.With("component", "reconciler"))
 		r.Interval = cfg.Merge.CheckInterval
 		r.AutoMerge, r.RequireCI = cfg.Merge.AutoMergeEnabled(), cfg.Merge.CIRequired()
+		approvals := approval.New(db, hosts, log.With("component", "approval"))
+		approvals.AutoMerge = r.AutoMerge
+		r.Approvals, r.Notify = approvals, queue
 		r.Run(ctx)
+	}()
+
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		sender.Run(ctx)
 	}()
 
 	errc := make(chan error, len(servers))
@@ -557,6 +594,7 @@ func serve() error {
 	<-pollerDone
 	<-mainDone
 	<-reconcilerDone
+	<-senderDone
 	return runErr
 }
 

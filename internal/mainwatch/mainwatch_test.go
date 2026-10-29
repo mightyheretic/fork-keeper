@@ -14,6 +14,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/archive"
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/license"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -275,5 +276,31 @@ func TestLicensesDirIsRead(t *testing.T) {
 	r := w.Check(context.Background(), target, true)
 	if r.Err != nil || r.Diff == nil || !slices.Contains(r.Diff.Added, "BUSL-1.1") {
 		t.Fatalf("LICENSES dir: %+v", r)
+	}
+}
+
+type fakeNotifier struct{ n []notify.Notice }
+
+func (f *fakeNotifier) Notify(_ context.Context, n notify.Notice) (bool, error) {
+	f.n = append(f.n, n)
+	return true, nil
+}
+
+func TestEarlyWarningNotifies(t *testing.T) {
+	w, reader, _, _, target := setup(t, true)
+	n := &fakeNotifier{}
+	w.Notify = n
+	reader.commits[sha('c')] = map[string]string{"LICENSE": buslText}
+	reader.head = sha('c')
+	if r := w.Check(context.Background(), target, false); r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if len(n.n) != 1 {
+		t.Fatalf("notices = %+v", n.n)
+	}
+	m := n.n[0].Message
+	if m.Priority != notify.PriorityUrgent || !strings.Contains(m.Title, "FROZEN") || !strings.Contains(m.Body, "frozen at v1.0.0") ||
+		!strings.Contains(m.Body, "forkkeeper/last-open") || n.n[0].DecisionID == 0 || n.n[0].Key != "decision:github/up/app@main@"+sha('c')[:12] {
+		t.Fatalf("notice = %+v", n.n[0])
 	}
 }

@@ -30,10 +30,8 @@ type Config struct {
 	License     License     `yaml:"license"`
 	Merge       Merge       `yaml:"merge"`
 	Archive     Archive     `yaml:"archive"`
-
-	// Sections owned by later milestones. Kept as raw YAML so the strict
-	// decoder still catches typos in the sections above.
-	Notifications yaml.Node `yaml:"notifications"`
+	// Notifications configures where messages go.
+	Notifications Notifications `yaml:"notifications"`
 }
 
 // Watcher configures upstream polling.
@@ -423,6 +421,7 @@ func (c *Config) validate() error {
 
 	c.validateLicense(add)
 	c.validateArchive(add)
+	c.validateNotifications(add)
 	if c.Merge.CheckInterval < 30*time.Second {
 		add("merge.check_interval: must be at least 30s")
 	}
@@ -499,6 +498,9 @@ func (c *Config) CredentialNames() []string {
 	}
 	if t := c.Archive.SoftwareHeritageToken; t != "" {
 		seen[t] = true
+	}
+	for _, n := range c.Notifications.credentialNames() {
+		seen[n] = true
 	}
 	for _, r := range c.Repos {
 		for _, m := range c.MirrorsFor(r) {
