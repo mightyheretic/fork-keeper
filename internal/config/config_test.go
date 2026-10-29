@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -242,5 +243,67 @@ merge:
 	dup := "credentials: {provider: env}\nrepos:\n  - {upstream: up/a, fork: me/x}\n  - {upstream: up/b, fork: me/x}\n"
 	if _, err := Parse([]byte(dup)); err == nil || !strings.Contains(err.Error(), "listed twice") {
 		t.Fatalf("duplicate fork: %v", err)
+	}
+}
+
+func TestArchiveConfig(t *testing.T) {
+	cfg, err := Parse([]byte(`
+credentials: {provider: env}
+watcher:
+  main_branch: false
+archive:
+  software_heritage_token: swh_token
+  mirrors:
+    - url: https://codeberg.org/me/{name}.git
+      token: codeberg_token
+      username: me
+repos:
+  - upstream: up/a
+    fork: me/a
+    main_branch: true
+  - upstream: up/b
+    archive:
+      releases: major
+      push_to_fork: false
+      software_heritage: false
+      mirrors:
+        - url: https://gitlab.example.com/backup/{owner}-{name}.git
+          refs: tags
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := cfg.Repos[0], cfg.Repos[1]
+	if !cfg.WatchesMainBranch(a) || cfg.WatchesMainBranch(b) {
+		t.Fatal("main_branch override")
+	}
+	sa := cfg.ArchiveFor(a)
+	if sa.Releases != ReleasesMinor || !sa.PushToFork || !sa.SoftwareHeritage || len(sa.Mirrors) != 1 ||
+		sa.Mirrors[0].URL != "https://codeberg.org/me/a.git" || sa.Mirrors[0].Username != "me" || sa.Mirrors[0].Refs != MirrorRefsHidden {
+		t.Fatalf("repo a: %+v", sa)
+	}
+	sb := cfg.ArchiveFor(b)
+	if sb.Releases != ReleasesMajor || sb.PushToFork || sb.SoftwareHeritage || len(sb.Mirrors) != 2 ||
+		sb.Mirrors[1].URL != "https://gitlab.example.com/backup/up-b.git" || sb.Mirrors[1].Username != "x-access-token" {
+		t.Fatalf("repo b: %+v", sb)
+	}
+	names := cfg.CredentialNames()
+	if !slices.Contains(names, "swh_token") || !slices.Contains(names, "codeberg_token") {
+		t.Fatalf("credential names: %v", names)
+	}
+	if def, _ := Parse([]byte("credentials: {provider: env}\nrepos: [{upstream: up/a}]\n")); !def.WatchesMainBranch(def.Repos[0]) {
+		t.Fatal("main branch watch should default on")
+	}
+
+	for name, bad := range map[string]string{
+		"policy":     "archive: {releases: patch}",
+		"http":       "archive: {mirrors: [{url: 'http://example.com/x.git'}]}",
+		"userinfo":   "archive: {mirrors: [{url: 'https://me:secret@example.com/x.git'}]}",
+		"layout":     "archive: {mirrors: [{url: 'https://example.com/x.git', refs: branches}]}",
+		"repo field": "repos: [{upstream: up/a, archive: {software_heritage_token: x}}]",
+	} {
+		if _, err := Parse([]byte("credentials: {provider: env}\n" + bad + "\n")); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
 	}
 }

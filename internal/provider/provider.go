@@ -294,3 +294,35 @@ type ForkHost interface {
 	// MergePullRequest merges with a merge commit, only if head is still sha.
 	MergePullRequest(ctx context.Context, repo Repo, number int, sha, title string) error
 }
+
+// BranchHead is the head commit of a repo's default branch.
+type BranchHead struct {
+	SHA string
+	// ETag identifies this response for the next conditional request.
+	ETag string
+	// NotModified means the ETag matched and SHA is empty.
+	NotModified bool
+	RateLimit   RateLimit
+}
+
+// TreeFile is a file in a repo at some commit.
+type TreeFile struct {
+	Path string
+	// ID is the host's content ID (the git blob SHA): equal IDs mean equal
+	// content.
+	ID   string
+	Size int64
+}
+
+// BranchReader reads an upstream's default branch without cloning it, for
+// the early warning.
+type BranchReader interface {
+	// DefaultHead returns the default branch's head commit, or NotModified
+	// when etag still matches.
+	DefaultHead(ctx context.Context, repo Repo, etag string) (BranchHead, error)
+	// ListFiles lists the files directly in dir ("" for the root) at commit.
+	// Subdirectories are listed with a trailing "/" and an empty ID.
+	ListFiles(ctx context.Context, repo Repo, commit, dir string) ([]TreeFile, error)
+	// ReadFile returns a file's content by its ID.
+	ReadFile(ctx context.Context, repo Repo, id string) ([]byte, error)
+}

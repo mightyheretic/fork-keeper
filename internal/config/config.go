@@ -29,6 +29,7 @@ type Config struct {
 	Repos       []Repo      `yaml:"repos"`
 	License     License     `yaml:"license"`
 	Merge       Merge       `yaml:"merge"`
+	Archive     Archive     `yaml:"archive"`
 
 	// Sections owned by later milestones. Kept as raw YAML so the strict
 	// decoder still catches typos in the sections above.
@@ -45,6 +46,10 @@ type Watcher struct {
 	// "anonymous". When empty, github.repo_auth is applied to the upstream
 	// name, falling back to anonymous if nothing matches.
 	Auth string `yaml:"auth"`
+	// MainBranch turns on the default-branch early warning: each poll
+	// checks whether the upstream's top-level license changed on its
+	// default branch before a release ships it. Default true.
+	MainBranch *bool `yaml:"main_branch"`
 }
 
 // Watch modes.
@@ -82,8 +87,11 @@ type Repo struct {
 	// MergeStrategy is merge (default), patch-stack or merge-only.
 	MergeStrategy string `yaml:"merge_strategy"`
 
-	// Used by later milestones.
-	Archive yaml.Node `yaml:"archive"`
+	// MainBranch overrides watcher.main_branch.
+	MainBranch *bool `yaml:"main_branch"`
+	// Archive overrides the top-level archive settings. Mirrors are added
+	// to the top-level ones.
+	Archive RepoArchive `yaml:"archive"`
 }
 
 // Merge strategies.
@@ -119,6 +127,15 @@ func (m Merge) AutoMergeEnabled() bool { return m.AutoMerge == nil || *m.AutoMer
 
 // CIRequired reports whether merge.require_ci is on.
 func (m Merge) CIRequired() bool { return m.RequireCI == nil || *m.RequireCI }
+
+// WatchesMainBranch reports whether r's default branch is checked for
+// license changes between releases.
+func (c *Config) WatchesMainBranch(r Repo) bool {
+	if r.MainBranch != nil {
+		return *r.MainBranch
+	}
+	return c.Watcher.MainBranch == nil || *c.Watcher.MainBranch
+}
 
 // WantsPrereleases reports whether pre-releases of r should be queued.
 func (c *Config) WantsPrereleases(r Repo) bool {
@@ -275,6 +292,7 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	c.licenseDefaults()
+	c.archiveDefaults()
 	if c.Merge.CheckInterval == 0 {
 		c.Merge.CheckInterval = 5 * time.Minute
 	}
@@ -404,6 +422,7 @@ func (c *Config) validate() error {
 	}
 
 	c.validateLicense(add)
+	c.validateArchive(add)
 	if c.Merge.CheckInterval < 30*time.Second {
 		add("merge.check_interval: must be at least 30s")
 	}
@@ -476,6 +495,16 @@ func (c *Config) CredentialNames() []string {
 			seen[a.PrivateKey] = true
 		case AuthPAT:
 			seen[a.Token] = true
+		}
+	}
+	if t := c.Archive.SoftwareHeritageToken; t != "" {
+		seen[t] = true
+	}
+	for _, r := range c.Repos {
+		for _, m := range c.MirrorsFor(r) {
+			if m.Token != "" {
+				seen[m.Token] = true
+			}
 		}
 	}
 	return slices.Sorted(maps.Keys(seen))

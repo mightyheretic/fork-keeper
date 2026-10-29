@@ -120,17 +120,13 @@ func (s *Store) PreviousRef(ctx context.Context, key RefKey, kind provider.Event
 	}
 	defer rows.Close()
 
-	type cand struct {
-		name      string
-		published int64
-	}
-	var cands []cand
+	var cands []refCand
 	cur := publishedAt.UnixMilli()
 	if publishedAt.IsZero() {
 		cur = 0
 	}
 	for rows.Next() {
-		var c cand
+		var c refCand
 		if err := rows.Scan(&c.name, &c.published); err != nil {
 			return "", false, err
 		}
@@ -146,23 +142,16 @@ func (s *Store) PreviousRef(ctx context.Context, key RefKey, kind provider.Event
 		return "", false, err
 	}
 
-	versioned := func(name string) bool { return strings.ContainsAny(name, "0123456789") }
-	before := func(c cand) bool {
+	before := func(c refCand) bool {
 		if (!versioned(c.name) || !versioned(key.Ref)) && cur > 0 && c.published > 0 {
 			return c.published < cur
 		}
 		return provider.CompareVersions(c.name, key.Ref) < 0
 	}
-	newer := func(a, b cand) bool { // is a newer than b?
-		if c := provider.CompareVersions(a.name, b.name); c != 0 && versioned(a.name) && versioned(b.name) {
-			return c > 0
-		}
-		return a.published > b.published
-	}
-	var best *cand
+	var best *refCand
 	for i := range cands {
 		c := &cands[i]
-		if before(*c) && (best == nil || newer(*c, *best)) {
+		if before(*c) && (best == nil || c.newerThan(*best)) {
 			best = c
 		}
 	}
@@ -170,4 +159,21 @@ func (s *Store) PreviousRef(ctx context.Context, key RefKey, kind provider.Event
 		return "", false, nil
 	}
 	return best.name, true, nil
+}
+
+// refCand is an upstream ref being ranked by version.
+type refCand struct {
+	name      string
+	published int64
+}
+
+func versioned(name string) bool { return strings.ContainsAny(name, "0123456789") }
+
+// newerThan orders refs by version number, or by publish date when either
+// name has no version in it.
+func (a refCand) newerThan(b refCand) bool {
+	if c := provider.CompareVersions(a.name, b.name); c != 0 && versioned(a.name) && versioned(b.name) {
+		return c > 0
+	}
+	return a.published > b.published
 }

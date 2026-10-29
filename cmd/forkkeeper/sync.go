@@ -70,7 +70,8 @@ func syncCmd(args []string) int {
 		return 1
 	}
 	defer db.Close()
-	auth := newGitHubAuth(cfg, newCredentials(cfg.Credentials))
+	creds := newCredentials(cfg.Credentials)
+	auth := newGitHubAuth(cfg, creds)
 	engine, _, err := newMergeEngine(cfg, auth, db, log.With("component", "merge"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -85,6 +86,9 @@ func syncCmd(args []string) int {
 	if !*dryRun {
 		pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, engine, log.With("component", "pipeline"))
 		pipe.ForceSync = *force
+		if archiver, err := newArchiver(cfg, auth, creds, db, log.With("component", "archive")); err == nil {
+			pipe.Archiver = archiver
+		}
 		out, err := pipe.Run(ctx, ev)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

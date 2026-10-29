@@ -2,6 +2,7 @@ package license
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -11,8 +12,29 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 )
+
+// Files walks in-memory files, keyed by slash-separated path, in path order.
+type Files map[string][]byte
+
+func (f Files) Walk(ctx context.Context, fn FileFunc) error {
+	paths := make([]string, 0, len(f))
+	for p := range f {
+		paths = append(paths, p)
+	}
+	slices.Sort(paths)
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := fn(p, int64(len(f[p])), bytes.NewReader(f[p])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Dir walks a local directory. Symlinks are not followed.
 type Dir string

@@ -1,7 +1,7 @@
 // Package pipeline processes a queued upstream release: license gate, then
 // rule engine, then the actions that can be applied right away, then the
-// merge engine. Later stages (archive, notify) pick up the recorded
-// pending actions.
+// source backup, then the merge engine. Later stages (notify) pick up the
+// recorded pending actions.
 package pipeline
 
 import (
@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/mightyheretic/fork-keeper/internal/archive"
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/merge"
@@ -26,6 +27,7 @@ type Store interface {
 	SaveDecision(ctx context.Context, d store.Decision) (int64, error)
 	Freeze(ctx context.Context, provider, repo, ref, reason string, decisionID int64) (bool, error)
 	RepoState(ctx context.Context, provider, repo string) (store.RepoState, error)
+	CompletePending(ctx context.Context, decisionID int64, action string) error
 }
 
 // Checker runs the license gate.
@@ -38,6 +40,11 @@ type Syncer interface {
 	Sync(ctx context.Context, req merge.Request) (merge.Result, error)
 }
 
+// Archiver makes source backups.
+type Archiver interface {
+	Backup(ctx context.Context, req archive.Request) (archive.Result, error)
+}
+
 // Pipeline handles one event at a time.
 type Pipeline struct {
 	cfg    *config.Config
@@ -48,6 +55,8 @@ type Pipeline struct {
 	log    *slog.Logger
 	// ForceSync re-syncs refs that were already synced (CLI use).
 	ForceSync bool
+	// Archiver backs up releases; nil disables backups.
+	Archiver Archiver
 }
 
 // New returns a pipeline. syncer may be nil to only check licenses.
@@ -63,6 +72,8 @@ type Outcome struct {
 	// NewlyFrozen is true when this event froze the repo.
 	NewlyFrozen bool
 	State       store.RepoState
+	// Backup is set when a source backup ran.
+	Backup *archive.Result
 	// Sync is set when the merge engine ran.
 	Sync *merge.Result
 }
@@ -159,12 +170,16 @@ func (p *Pipeline) Run(ctx context.Context, ev provider.Event) (Outcome, error) 
 		log.Info("other rules also matched but had lower precedence", "rules", strings.Join(d.Matched[1:], ", "))
 	}
 
+	// Back up before syncing: protecting the source matters most. A
+	// failed backup is retried with the event; the sync is idempotent.
+	backupErr := p.backup(ctx, log, ev, repoCfg, res, id, &out)
+
 	if repoCfg.Fork == "" || p.syncer == nil {
-		return out, nil
+		return out, backupErr
 	}
 	if out.State.Frozen {
 		log.Info("not syncing the fork: repo is frozen", "frozen_at", out.State.FrozenRef)
-		return out, nil
+		return out, backupErr
 	}
 	fork, err := provider.ParseRepo(repoCfg.Fork)
 	if err != nil {
@@ -174,14 +189,55 @@ func (p *Pipeline) Run(ctx context.Context, ev provider.Event) (Outcome, error) 
 	req.Force = p.ForceSync
 	sync, err := p.syncer.Sync(ctx, req)
 	if errors.Is(err, provider.ErrRefNotFound) || errors.Is(err, merge.ErrNoCommonHistory) {
-		return out, worker.Permanent(err)
+		return out, errors.Join(backupErr, worker.Permanent(err))
 	}
 	if err != nil {
-		return out, fmt.Errorf("sync %s: %w", repoCfg.Fork, err)
+		return out, errors.Join(backupErr, fmt.Errorf("sync %s: %w", repoCfg.Fork, err))
 	}
 	out.Sync = &sync
 	logSync(log, sync)
-	return out, nil
+	return out, backupErr
+}
+
+// backup backs up the source of the new release if the archive policy
+// wants it and the repo isn't frozen. When a rule froze the repo or asked
+// for an archive, it backs up the previous version instead, as the last
+// good one, whatever the policy.
+func (p *Pipeline) backup(ctx context.Context, log *slog.Logger, ev provider.Event, repoCfg config.Repo,
+	res gate.Result, decisionID int64, out *Outcome) error {
+	if p.Archiver == nil {
+		return nil
+	}
+	d := out.Decision
+	settings := p.cfg.ArchiveFor(repoCfg)
+	req := archive.Request{Provider: ev.Provider, Upstream: ev.Repo, Fork: repoCfg.Fork, Settings: settings}
+	archiveAction := d.Has(config.ActionArchive)
+	switch {
+	case out.NewlyFrozen || archiveAction:
+		if res.Previous == "" {
+			log.Warn("license rule asks to archive the last good version, but there is no earlier version")
+			break
+		}
+		req.LastGood, req.Urgent = res.Previous, true
+		req.Reason = fmt.Sprintf("last version before %s (%s)", ev.Tag, d.Rule)
+	case out.State.Frozen:
+	case !ev.Prerelease && archive.Wants(settings.Releases, ev.Tag):
+		req.Tags = []string{ev.Tag}
+		req.Reason = settings.Releases + " release"
+	}
+	if req.LastGood == "" && len(req.Tags) == 0 {
+		return nil
+	}
+	r, err := p.Archiver.Backup(ctx, req)
+	if err != nil {
+		return fmt.Errorf("back up %s: %w", ev.Repo.FullName(), err)
+	}
+	out.Backup = &r
+	log.Info("source backed up", "added", r.Added, "already_backed_up", r.Existing, "missing", r.Missing)
+	if archiveAction && req.LastGood != "" {
+		return p.store.CompletePending(ctx, decisionID, config.ActionArchive)
+	}
+	return nil
 }
 
 // SyncRequest builds the merge engine request for an event.
