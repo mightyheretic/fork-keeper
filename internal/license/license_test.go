@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"slices"
@@ -251,7 +253,7 @@ func TestCompareRelicense(t *testing.T) {
 		"ee/LICENSE.md": buslText,
 	})
 	d := Compare("v1", old, "v2", cur)
-	if !d.Changed || d.OldDeclared != "MIT" || d.NewDeclared != "BUSL-1.1" {
+	if !d.Changed || !d.TopLevelChanged || d.OldDeclared != "MIT" || d.NewDeclared != "BUSL-1.1" {
 		t.Fatalf("diff = %+v", d)
 	}
 	if !slices.Equal(d.Added, []string{"BUSL-1.1"}) || !slices.Equal(d.Removed, []string{"MIT"}) {
@@ -265,6 +267,29 @@ func TestCompareRelicense(t *testing.T) {
 		t.Fatalf("headers = %+v", h)
 	}
 	if !strings.Contains(d.Summary(), "declared MIT -> BUSL-1.1") {
+		t.Fatalf("summary = %q", d.Summary())
+	}
+}
+
+func TestCompareSeparatesTopLevelFromSubLicenses(t *testing.T) {
+	old := scan(t, mapTree{"LICENSE": mitText, "a.go": "// SPDX-License-Identifier: Apache-2.0\n"})
+	cur := scan(t, mapTree{
+		"LICENSE":               mitText,
+		"a.go":                  "// SPDX-License-Identifier: Apache-2.0\n",
+		"b.go":                  "// SPDX-License-Identifier: MIT\n",
+		"third_party/x/LICENSE": mitText,
+		"ee/LICENSE":            buslText,
+	})
+	d := Compare("v1", old, "v2", cur)
+	if !d.Changed || d.TopLevelChanged {
+		t.Fatalf("changed=%v top=%v: %s", d.Changed, d.TopLevelChanged, d.Summary())
+	}
+	// MIT is already the project's license and Apache-2.0 was already in a
+	// header; only BUSL is new to the project.
+	if !slices.Equal(d.SubAdded, []string{"BUSL-1.1"}) {
+		t.Fatalf("sub added = %v", d.SubAdded)
+	}
+	if !strings.HasPrefix(d.Summary(), "top-level license unchanged") {
 		t.Fatalf("summary = %q", d.Summary())
 	}
 }
@@ -326,5 +351,38 @@ func TestTarGzWalker(t *testing.T) {
 	}
 	if !slices.Equal(paths, []string{"LICENSE", "src/a.go"}) {
 		t.Fatalf("paths = %v", paths)
+	}
+}
+
+func TestLicensesDirNextToRootLicenseIsBundled(t *testing.T) {
+	// rea-style: the project is MIT; licenses/ holds bundled third-party licenses.
+	r := scan(t, mapTree{"LICENSE": mitText, "licenses/vendored-LICENSE.txt": buslText})
+	if r.Declared != "MIT" || !slices.Equal(r.Licenses, []string{"MIT"}) {
+		t.Fatalf("declared = %s, licenses = %v", r.Declared, r.Licenses)
+	}
+	// REUSE-style: no root license file, so LICENSES/ is the project's license.
+	reuse := scan(t, mapTree{"LICENSES/MIT.txt": mitText, "LICENSES/BUSL-1.1.txt": buslText})
+	if !slices.Equal(reuse.Licenses, []string{"BUSL-1.1", "MIT"}) {
+		t.Fatalf("REUSE licenses = %v", reuse.Licenses)
+	}
+	// Elasticsearch-style: the root file only points at licenses/.
+	pointer := scan(t, mapTree{"LICENSE.txt": "Source code in this repository is licensed under the terms in licenses/.\n",
+		"licenses/MIT.txt": mitText})
+	if !slices.Contains(pointer.Licenses, "MIT") {
+		t.Fatalf("pointer licenses = %v", pointer.Licenses)
+	}
+}
+
+func TestStaleReportIsRejected(t *testing.T) {
+	b, err := scan(t, mapTree{"LICENSE": mitText}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalReport(b); err != nil {
+		t.Fatal(err)
+	}
+	old := strings.Replace(string(b), fmt.Sprintf(`"scan_version":%d`, ScanVersion), `"scan_version":1`, 1)
+	if _, err := UnmarshalReport([]byte(old)); !errors.Is(err, ErrStaleReport) {
+		t.Fatalf("err = %v", err)
 	}
 }

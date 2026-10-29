@@ -69,6 +69,9 @@ type Repo struct {
 	IncludePrereleases *bool `yaml:"include_prereleases"`
 	// Groups name sets of repos that license rules can target.
 	Groups []string `yaml:"groups"`
+	// SubLicenses is escalate (default), ignore or all: how nested license
+	// files and file headers count. See SubLicensesEscalate.
+	SubLicenses string `yaml:"sub_licenses"`
 
 	// StableBranch is the fork branch PRs target. Default: the fork's
 	// default branch.
@@ -261,6 +264,9 @@ func (c *Config) applyDefaults() {
 		if r.StagingBranch == "" {
 			r.StagingBranch = DefaultStagingBranch
 		}
+		if r.SubLicenses == "" {
+			r.SubLicenses = SubLicensesEscalate
+		}
 		switch r.MergeStrategy {
 		case "":
 			r.MergeStrategy = StrategyMerge
@@ -376,6 +382,11 @@ func (c *Config) validate() error {
 		forks[strings.ToLower(r.Fork)] = true
 		if r.Watch != WatchReleases && r.Watch != WatchTags {
 			add("%s.watch: unknown mode %q (want releases or tags)", p, r.Watch)
+		}
+		switch r.SubLicenses {
+		case SubLicensesEscalate, SubLicensesIgnore, SubLicensesAll:
+		default:
+			add("%s.sub_licenses: unknown mode %q (want escalate, ignore or all)", p, r.SubLicenses)
 		}
 		switch r.MergeStrategy {
 		case StrategyMerge, StrategyPatchStack, StrategyMergeOnly:

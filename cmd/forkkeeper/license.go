@@ -17,7 +17,10 @@ import (
 const licenseUsage = `usage:
   forkkeeper license scan <dir | owner/repo@ref>
   forkkeeper license diff <owner/repo> <old-ref> <new-ref>
-  forkkeeper license diff <dir | owner/repo@ref> <dir | owner/repo@ref>`
+  forkkeeper license diff <dir | owner/repo@ref> <dir | owner/repo@ref>
+
+diff exits 3 when the top-level license changed, 4 when only sub-licenses
+(nested license files or file headers) changed, and 0 otherwise.`
 
 // licenseCmd scans or diffs licenses without touching the database.
 // Remote refs are downloaded as tarballs using the poll auth profile.
@@ -74,8 +77,12 @@ func licenseCmd(args []string) int {
 		}
 		d := license.Compare(refLabel(oldT), oldR, refLabel(newT), newR)
 		d.WriteText(os.Stdout)
-		if d.Changed {
-			return 3 // distinct exit code so scripts can detect a change
+		// Distinct exit codes so scripts can detect a change.
+		switch {
+		case d.TopLevelChanged:
+			return 3
+		case d.Changed:
+			return 4 // only nested license files or file headers changed
 		}
 		return 0
 	}

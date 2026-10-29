@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
@@ -131,5 +132,38 @@ func TestCIStatus(t *testing.T) {
 				t.Fatalf("failed = %v", st.Failed)
 			}
 		})
+	}
+}
+
+func TestCreateForkWaitsUntilReady(t *testing.T) {
+	polls := 0
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /repos/up/app/forks":
+			json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{"name": "app", "default_branch": "main", "owner": {"login": "me"}}`))
+		case "GET /repos/me/app/commits":
+			polls++
+			if polls < 3 {
+				w.WriteHeader(http.StatusConflict)
+				w.Write([]byte(`{"message": "Git Repository is empty."}`))
+				return
+			}
+			w.Write([]byte(`[{"sha": "abc"}]`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	f := NewForks(srv.URL, staticToken("tok"), nil)
+	f.ForkPoll = time.Millisecond
+	got, branch, err := f.CreateFork(context.Background(), provider.Repo{Owner: "up", Name: "app"}, "")
+	if err != nil || got.FullName() != "me/app" || branch != "main" || polls != 3 {
+		t.Fatalf("fork = %v %q %v after %d polls", got, branch, err, polls)
+	}
+	if len(body) != 0 {
+		t.Fatalf("body = %v, want no organization", body)
 	}
 }

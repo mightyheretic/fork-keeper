@@ -57,8 +57,10 @@ func (d Decision) Has(action string) bool { return slices.Contains(d.Actions, ac
 type Engine struct {
 	allow    map[string]bool
 	defaults []string
+	escalate []string
 	rules    []rule
 	groupsOf func(repo string) []string
+	subOf    func(repo string) string
 }
 
 type rule struct {
@@ -73,9 +75,16 @@ func New(cfg *config.Config) *Engine {
 	e := &Engine{
 		allow:    map[string]bool{},
 		defaults: cfg.License.DefaultActions,
+		escalate: cfg.License.EscalationActions,
 		groupsOf: func(repo string) []string {
 			r, _ := cfg.RepoFor(repo)
 			return r.Groups
+		},
+		subOf: func(repo string) string {
+			if r, ok := cfg.RepoFor(repo); ok {
+				return r.SubLicenses
+			}
+			return config.SubLicensesEscalate
 		},
 	}
 	for _, id := range cfg.License.Allowlist {
@@ -97,26 +106,38 @@ func New(cfg *config.Config) *Engine {
 	return e
 }
 
+// Scope of the built-in sub-license escalation.
+const ScopeEscalation = "escalation"
+
 // Evaluate decides what to do about the change from d.OldRef to d.NewRef
-// for repo ("owner/name").
+// for repo ("owner/name"). Rules run when the project's own (top-level)
+// license changed. Sub-license changes (nested license files, file
+// headers) depend on the repo's sub_licenses mode; see
+// config.SubLicensesEscalate.
 func (e *Engine) Evaluate(repo string, d *license.Diff) Decision {
+	mode := e.subOf(repo)
 	if !d.Changed {
 		return Decision{MergePolicy: MergeAuto, Reason: "licenses unchanged"}
 	}
-	top := transition{old: d.OldLicenses, added: d.Added, removed: d.Removed}
-	deep := top
-	deep.added = union(d.Added, d.Headers.Added, nestedAdded(d))
-	deep.removed = union(d.Removed, d.Headers.Removed)
+	if !d.TopLevelChanged {
+		switch mode {
+		case config.SubLicensesIgnore:
+			return Decision{MergePolicy: MergeAuto, Reason: "top-level license unchanged; sub-license changes ignored"}
+		case config.SubLicensesEscalate:
+			return e.escalation(d)
+		}
+	}
+	t := transition{old: d.OldLicenses, added: d.Added, removed: d.Removed}
+	if mode == config.SubLicensesAll {
+		t.added = union(d.Added, d.Headers.Added, nestedAdded(d))
+		t.removed = union(d.Removed, d.Headers.Removed)
+	}
 
 	var matched []rule
 	var reasons []string
 	for _, r := range e.rules {
 		if !e.inScope(r, repo) {
 			continue
-		}
-		t := top
-		if r.Level == config.LevelAny {
-			t = deep
 		}
 		if why, ok := e.match(r, t); ok {
 			matched = append(matched, r)
@@ -141,6 +162,25 @@ func (e *Engine) Evaluate(repo string, d *license.Diff) Decision {
 		}
 	}
 	return e.decide(matched[best].Name, matched[best].scope, matched[best].Actions, order, reasons[best])
+}
+
+// escalation handles a version whose top-level license is unchanged: it
+// acts only if a sub-license brings in a license that is new to the
+// project and not on the allowlist (or unidentified).
+func (e *Engine) escalation(d *license.Diff) Decision {
+	var flagged []string
+	for _, id := range d.SubAdded {
+		if !e.allow[id] {
+			flagged = append(flagged, id)
+		}
+	}
+	if len(flagged) == 0 {
+		return Decision{MergePolicy: MergeAuto,
+			Reason: "top-level license unchanged; sub-license changes only use licenses already in the project or on the allowlist"}
+	}
+	return e.decide("sub-license-escalation", ScopeEscalation, e.escalate, nil,
+		fmt.Sprintf("top-level license unchanged, but nested license files or file headers bring in %s, "+
+			"new to the project and not on the allowlist: %s", strings.Join(flagged, ", "), d.Summary()))
 }
 
 // EvaluateFirst handles the first version seen of a repo: there is no

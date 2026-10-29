@@ -61,12 +61,14 @@ func main() {
 		os.Exit(unfreezeCmd(os.Args[2:]))
 	case "sync":
 		os.Exit(syncCmd(os.Args[2:]))
+	case "fork":
+		os.Exit(forkCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, sync, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, sync, fork, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }

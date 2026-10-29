@@ -102,7 +102,13 @@ license:
 ```
 
 - **Patterns:** SPDX IDs (aliases like `BSL-1.1` are accepted), globs, `any`, `not-allowed` (outside the allowlist) and `unknown` (no license, or one that couldn't be identified).
-- **Level:** `level: any` also looks at nested license files and file headers, not just the top level.
+- **What counts as a license change:** rules run when the project's own license changes. That covers the declared expression, root license files and manifests. Nested license files (such as `ee/LICENSE` or vendored third-party licenses) and file headers are sub-licenses, and each repo's `sub_licenses` setting decides how they count:
+
+  | `sub_licenses` | Effect |
+  |---|---|
+  | `escalate` (default) | Ignored, unless a sub-license brings in a license that's new to the project and not on the allowlist (a BUSL `ee/` folder, say). That runs `escalation_actions`, by default require approval, flag the PR and notify |
+  | `ignore` | Recorded, never acted on |
+  | `all` | Any sub-license change counts, and rules also match licenses added in nested files and headers |
 - **Which rule wins:** the most specific rule (repo > group > global), then the highest `priority`, then the earliest in the file.
 - **New repos:** a repo's first version is checked against the allowlist.
 
@@ -127,6 +133,12 @@ forkkeeper unfreeze --reason "upstream reverted" owner/repo
 
 Set `fork:` on a repo to have each new upstream release merged into it. Repos without a fork
 are only watched and license-checked.
+
+To create the fork itself, run `forkkeeper fork owner/repo`. It forks into the account of the
+auth profile's token (or `--org`), waits until GitHub has copied the repo, and prints the config
+to add. Forking with a fine-grained PAT needs **Administration: read & write** and repository
+access set to "All repositories". Syncing doesn't need it, so you can remove it afterwards, or
+just click "Fork" on GitHub instead.
 
 ```yaml
 repos:

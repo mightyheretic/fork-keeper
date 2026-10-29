@@ -3,11 +3,13 @@ package github
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
@@ -19,12 +21,17 @@ type Forks struct {
 	api   *apiClient
 	web   string
 	token TokenFunc
+	// ForkTimeout bounds how long CreateFork waits for GitHub to copy the repo.
+	ForkTimeout time.Duration
+	// ForkPoll is the delay between readiness checks.
+	ForkPoll time.Duration
 }
 
 // NewForks returns a ForkHost. token supplies credentials per repo (nil for
 // anonymous, which can only fetch public repos).
 func NewForks(apiURL string, token TokenFunc, hc *http.Client) *Forks {
-	return &Forks{api: newAPIClient(apiURL, hc), web: webURL(apiURL), token: token}
+	return &Forks{api: newAPIClient(apiURL, hc), web: webURL(apiURL), token: token,
+		ForkTimeout: 5 * time.Minute, ForkPoll: 3 * time.Second}
 }
 
 var _ provider.ForkHost = (*Forks)(nil)
@@ -237,4 +244,49 @@ func (f *Forks) CIStatus(ctx context.Context, repo provider.Repo, sha string) (p
 func (f *Forks) MergePullRequest(ctx context.Context, repo provider.Repo, number int, sha, title string) error {
 	return f.call(ctx, repo, http.MethodPut, fmt.Sprintf("/pulls/%d/merge", number),
 		map[string]any{"sha": sha, "merge_method": "merge", "commit_title": title}, nil)
+}
+
+// CreateFork forks upstream into the token owner's account, or into org if
+// set, and waits until GitHub has finished copying it. If the fork already
+// exists, GitHub returns it. It returns the fork and its default branch.
+func (f *Forks) CreateFork(ctx context.Context, upstream provider.Repo, org string) (provider.Repo, string, error) {
+	body := map[string]any{}
+	if org != "" {
+		body["organization"] = org
+	}
+	var created struct {
+		Name          string `json:"name"`
+		DefaultBranch string `json:"default_branch"`
+		Owner         struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+	}
+	if err := f.call(ctx, upstream, http.MethodPost, "/forks", body, &created); err != nil {
+		return provider.Repo{}, "", notFound(err)
+	}
+	fork := provider.Repo{Owner: created.Owner.Login, Name: created.Name}
+	if fork.Owner == "" || fork.Name == "" {
+		return provider.Repo{}, "", errors.New("GitHub did not return the new fork's name")
+	}
+
+	// Forking is asynchronous: the repo exists before its git data does.
+	// Until then the commits endpoint answers 409 (empty) or 404.
+	ctx, cancel := context.WithTimeout(ctx, f.ForkTimeout)
+	defer cancel()
+	for {
+		var commits []json.RawMessage
+		err := f.call(ctx, fork, http.MethodGet, "/commits?per_page=1", nil, &commits)
+		if err == nil && len(commits) > 0 {
+			return fork, created.DefaultBranch, nil
+		}
+		var apiErr *APIError
+		if err != nil && !(errors.As(err, &apiErr) && (apiErr.Status == http.StatusConflict || apiErr.Status == http.StatusNotFound)) {
+			return fork, "", err
+		}
+		select {
+		case <-ctx.Done():
+			return fork, "", fmt.Errorf("fork %s was created but GitHub hasn't finished copying it: %w", fork.FullName(), ctx.Err())
+		case <-time.After(f.ForkPoll):
+		}
+	}
 }

@@ -21,10 +21,14 @@ const coverageDrop = 5
 type Diff struct {
 	OldRef string `json:"old_ref"`
 	NewRef string `json:"new_ref"`
-	// Changed is true when anything license-relevant changed.
-	Changed     bool   `json:"changed"`
-	OldDeclared string `json:"old_declared"`
-	NewDeclared string `json:"new_declared"`
+	// Changed is true when anything license-relevant changed, including
+	// nested license files and file headers.
+	Changed bool `json:"changed"`
+	// TopLevelChanged is true when the project's own license changed: the
+	// declared expression, the top-level license set, or a root license file.
+	TopLevelChanged bool   `json:"top_level_changed"`
+	OldDeclared     string `json:"old_declared"`
+	NewDeclared     string `json:"new_declared"`
 	// OldLicenses and NewLicenses are the full top-level license sets.
 	OldLicenses []string `json:"old_licenses"`
 	NewLicenses []string `json:"new_licenses"`
@@ -33,6 +37,10 @@ type Diff struct {
 	Removed []string     `json:"removed,omitempty"`
 	Files   []FileChange `json:"files,omitempty"`
 	Headers HeaderDiff   `json:"headers"`
+	// SubAdded lists licenses that nested license files or file headers
+	// bring in and that appeared nowhere in the old version (top level,
+	// any license file or any header).
+	SubAdded []string `json:"sub_added,omitempty"`
 	// NewWarnings are warnings in the new report that the old one didn't have.
 	NewWarnings []string `json:"new_warnings,omitempty"`
 }
@@ -129,7 +137,30 @@ func Compare(oldRef string, old *Report, newRef string, cur *Report) *Diff {
 		}
 	}
 
-	d.Changed = d.OldDeclared != d.NewDeclared || len(d.Added) > 0 || len(d.Removed) > 0 ||
+	seen := map[string]bool{}
+	for _, id := range old.AllLicenses() {
+		seen[id] = true
+	}
+	var sub []string
+	for _, f := range d.Files {
+		if f.Root || f.Change == "removed" {
+			continue
+		}
+		if e, err := Parse(f.New); err == nil {
+			sub = append(sub, e.Licenses()...)
+		}
+	}
+	for _, id := range append(sub, d.Headers.Added...) {
+		if !seen[id] {
+			seen[id] = true
+			d.SubAdded = append(d.SubAdded, id)
+		}
+	}
+	slices.Sort(d.SubAdded)
+
+	d.TopLevelChanged = d.OldDeclared != d.NewDeclared || len(d.Added) > 0 || len(d.Removed) > 0 ||
+		slices.ContainsFunc(d.Files, func(f FileChange) bool { return f.Root })
+	d.Changed = d.TopLevelChanged ||
 		len(d.Files) > 0 || len(d.Headers.Added) > 0 || len(d.Headers.Removed) > 0 || d.Headers.Relicensed > 0
 	return d
 }
@@ -170,8 +201,15 @@ func (d *Diff) Summary() string {
 	if len(d.Headers.Added) > 0 {
 		parts = append(parts, "new in headers: "+strings.Join(d.Headers.Added, ", "))
 	}
+	if len(d.SubAdded) > 0 {
+		parts = append(parts, "new to the project: "+strings.Join(d.SubAdded, ", "))
+	}
 	if d.Headers.Relicensed > 0 {
 		parts = append(parts, fmt.Sprintf("%d file header(s) relicensed", d.Headers.Relicensed))
+	}
+	if !d.TopLevelChanged {
+		return fmt.Sprintf("top-level license unchanged between %s and %s (%s); sub-licenses: %s",
+			d.OldRef, d.NewRef, d.NewDeclared, strings.Join(parts, "; "))
 	}
 	return fmt.Sprintf("license change between %s and %s: %s", d.OldRef, d.NewRef, strings.Join(parts, "; "))
 }
