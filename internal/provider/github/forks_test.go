@@ -167,3 +167,65 @@ func TestCreateForkWaitsUntilReady(t *testing.T) {
 		t.Fatalf("body = %v, want no organization", body)
 	}
 }
+
+func TestApprovalPRCalls(t *testing.T) {
+	var calls []string
+	var gql map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.EscapedPath())
+		switch r.Method + " " + r.URL.EscapedPath() {
+		case "GET /repos/me/app/pulls/7":
+			w.Write([]byte(`{"number": 7, "node_id": "PR_kwABC", "state": "open", "draft": true, "head": {"sha": "abc"}}`))
+		case "POST /graphql":
+			json.NewDecoder(r.Body).Decode(&gql)
+			w.Write([]byte(`{"data": {"markPullRequestReadyForReview": {"clientMutationId": null}}}`))
+		case "DELETE /repos/me/app/issues/7/labels/forkkeeper:%20needs%20approval":
+			w.Write([]byte(`[]`))
+		case "DELETE /repos/me/app/issues/7/labels/forkkeeper:%20blocked":
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"message": "Label does not exist"}`))
+		case "POST /repos/me/app/issues/7/comments":
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{}`))
+		case "PATCH /repos/me/app/pulls/7":
+			w.Write([]byte(`{"number": 7, "state": "closed"}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.EscapedPath())
+			w.WriteHeader(http.StatusTeapot)
+		}
+	}))
+	defer srv.Close()
+	f := NewForks(srv.URL, staticToken("tok"), nil)
+	ctx := context.Background()
+	if err := f.MarkReadyForReview(ctx, fork, 7); err != nil {
+		t.Fatal(err)
+	}
+	if vars := gql["variables"].(map[string]any); vars["id"] != "PR_kwABC" {
+		t.Fatalf("graphql = %v", gql)
+	}
+	for _, l := range []string{"forkkeeper: needs approval", "forkkeeper: blocked"} {
+		if err := f.RemoveLabel(ctx, fork, 7, l); err != nil {
+			t.Fatalf("remove %q: %v", l, err)
+		}
+	}
+	if err := f.Comment(ctx, fork, 7, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ClosePullRequest(ctx, fork, 7); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 6 {
+		t.Fatalf("calls = %v", calls)
+	}
+}
+
+func TestGraphQLBase(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://api.github.com":          "https://api.github.com",
+		"https://ghe.example.com/api/v3/": "https://ghe.example.com/api",
+	} {
+		if got := graphQLBase(in); got != want {
+			t.Errorf("graphQLBase(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

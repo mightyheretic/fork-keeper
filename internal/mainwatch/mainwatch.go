@@ -22,6 +22,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/archive"
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/license"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -50,6 +51,11 @@ type Archiver interface {
 	Backup(ctx context.Context, req archive.Request) (archive.Result, error)
 }
 
+// Notifier queues notifications.
+type Notifier interface {
+	Notify(ctx context.Context, n notify.Notice) (bool, error)
+}
+
 // Target is one upstream whose default branch is watched.
 type Target struct {
 	Provider string
@@ -73,6 +79,8 @@ type Watcher struct {
 	Interval time.Duration
 	// Spacing is the pause between targets.
 	Spacing time.Duration
+	// Notify queues notifications; nil disables them.
+	Notify Notifier
 }
 
 // New returns a watcher. archiver may be nil (no backups).
@@ -280,7 +288,8 @@ func (w *Watcher) baseline(ctx context.Context, t Target, prev store.MainWatch) 
 // act records the decision, freezes if a rule says so, and backs up the
 // last commit before the change (and the last release, when frozen or
 // archived).
-func (w *Watcher) act(ctx context.Context, t Target, prev store.MainWatch, head string, base, cur *license.Report, res *Result) error {
+func (w *Watcher) act(ctx context.Context, t Target, prev store.MainWatch, head string, base, cur *license.Report,
+	res *Result) (err error) {
 	repo := t.Repo.FullName()
 	d := *res.Decision
 	release, _, err := w.store.LatestRef(ctx, t.Provider, repo, t.Kind)
@@ -304,6 +313,8 @@ func (w *Watcher) act(ctx context.Context, t Target, prev store.MainWatch, head 
 	if err != nil {
 		return err
 	}
+	// Tell someone even if the backup below fails: the warning matters most.
+	defer func() { w.notify(ctx, t, id, release, res, err) }()
 	if d.Has(config.ActionFreeze) {
 		if res.NewlyFrozen, err = w.store.Freeze(ctx, t.Provider, repo, release,
 			"license change on the default branch: "+d.Reason, id); err != nil {
@@ -344,6 +355,52 @@ func (w *Watcher) act(ctx context.Context, t Target, prev store.MainWatch, head 
 		return w.store.CompletePending(ctx, id, config.ActionArchive)
 	}
 	return nil
+}
+
+// notify sends the early warning when the rule asks for it, or when the
+// release will need approval.
+func (w *Watcher) notify(ctx context.Context, t Target, decisionID int64, release string, res *Result, actErr error) {
+	d := *res.Decision
+	if w.Notify == nil || !d.Has(config.ActionNotify) && d.MergePolicy == rules.MergeAuto {
+		return
+	}
+	repo := t.Repo.FullName()
+	m := notify.Message{Kind: notify.KindLicense, Repo: repo, Ref: res.Diff.NewRef, Priority: notify.PriorityHigh,
+		Tags: []string{"warning"}, Title: fmt.Sprintf("Early warning: %s is changing its license on %s", repo, res.Diff.NewRef)}
+	if !d.Has(config.ActionNotify) {
+		m.Kind = notify.KindApproval
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "The default branch of %s changed its top-level license; no release has it yet.\n\n%s\n\n",
+		repo, res.Diff.Summary())
+	if d.Rule != "" {
+		fmt.Fprintf(&b, "%s.\nActions: %s.\n", notify.Capitalize(d.Reason), strings.Join(d.Actions, ", "))
+	}
+	switch {
+	case res.NewlyFrozen:
+		m.Title = fmt.Sprintf("FROZEN (early warning): %s is relicensing on %s", repo, res.Diff.NewRef)
+		m.Priority, m.Tags = notify.PriorityUrgent, []string{"rotating_light"}
+		at := release
+		if at == "" {
+			at = "no version"
+		}
+		fmt.Fprintf(&b, "\nThe fork is frozen at %s before any release ships the change.\n", at)
+	case d.MergePolicy != rules.MergeAuto:
+		fmt.Fprintf(&b, "\nThe release that ships it will need your approval (%s).\n", strings.ReplaceAll(string(d.MergePolicy), "_", " "))
+	}
+	if res.LastOpen != "" {
+		fmt.Fprintf(&b, "The last commit before the change (%s) is backed up as forkkeeper/last-open.\n", short(res.LastOpen))
+	} else if actErr != nil {
+		fmt.Fprintf(&b, "Backing up the last commit before the change failed and will be retried: %v\n", actErr)
+	}
+	m.Body = strings.TrimSpace(b.String())
+	n := notify.Notice{Key: fmt.Sprintf("decision:%s/%s@%s", t.Provider, repo, res.Diff.NewRef), Provider: t.Provider, Message: m}
+	if d.Has(config.ActionNotify) {
+		n.DecisionID = decisionID
+	}
+	if _, err := w.Notify.Notify(ctx, n); err != nil {
+		w.log.Warn("could not queue notification", "repo", repo, "err", err)
+	}
 }
 
 // topLevelFiles lists the files that determine the top-level license at

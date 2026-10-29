@@ -19,6 +19,7 @@ import (
 // status on GitHub.
 type Forks struct {
 	api   *apiClient
+	gql   *apiClient
 	web   string
 	token TokenFunc
 	// ForkTimeout bounds how long CreateFork waits for GitHub to copy the repo.
@@ -30,7 +31,7 @@ type Forks struct {
 // NewForks returns a ForkHost. token supplies credentials per repo (nil for
 // anonymous, which can only fetch public repos).
 func NewForks(apiURL string, token TokenFunc, hc *http.Client) *Forks {
-	return &Forks{api: newAPIClient(apiURL, hc), web: webURL(apiURL), token: token,
+	return &Forks{api: newAPIClient(apiURL, hc), gql: newAPIClient(graphQLBase(apiURL), hc), web: webURL(apiURL), token: token,
 		ForkTimeout: 5 * time.Minute, ForkPoll: 3 * time.Second}
 }
 
@@ -108,6 +109,7 @@ func notFound(err error) error {
 
 type pullJSON struct {
 	Number   int    `json:"number"`
+	NodeID   string `json:"node_id"`
 	HTMLURL  string `json:"html_url"`
 	State    string `json:"state"`
 	Merged   bool   `json:"merged"`
@@ -123,7 +125,7 @@ type pullJSON struct {
 
 func (p pullJSON) pr() *provider.PullRequest {
 	pr := &provider.PullRequest{
-		Number: p.Number, URL: p.HTMLURL, State: p.State, Draft: p.Draft, HeadSHA: p.Head.SHA,
+		Number: p.Number, NodeID: p.NodeID, URL: p.HTMLURL, State: p.State, Draft: p.Draft, HeadSHA: p.Head.SHA,
 		// The list endpoint omits "merged" but includes merged_at.
 		Merged: p.Merged || p.MergedAt != "",
 	}
@@ -178,6 +180,66 @@ func (f *Forks) AddLabels(ctx context.Context, repo provider.Repo, number int, l
 	}
 	return f.call(ctx, repo, http.MethodPost, fmt.Sprintf("/issues/%d/labels", number),
 		map[string]any{"labels": labels}, nil)
+}
+
+// RemoveLabel removes a label from a PR; a label that isn't there is fine.
+func (f *Forks) RemoveLabel(ctx context.Context, repo provider.Repo, number int, label string) error {
+	err := f.call(ctx, repo, http.MethodDelete, fmt.Sprintf("/issues/%d/labels/%s", number, url.PathEscape(label)), nil, nil)
+	if apiErr, ok := errors.AsType[*APIError](err); ok && apiErr.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
+}
+
+// Comment adds a comment to a PR.
+func (f *Forks) Comment(ctx context.Context, repo provider.Repo, number int, body string) error {
+	return f.call(ctx, repo, http.MethodPost, fmt.Sprintf("/issues/%d/comments", number), map[string]any{"body": body}, nil)
+}
+
+// ClosePullRequest closes a PR without merging it.
+func (f *Forks) ClosePullRequest(ctx context.Context, repo provider.Repo, number int) error {
+	return f.call(ctx, repo, http.MethodPatch, fmt.Sprintf("/pulls/%d", number), map[string]any{"state": "closed"}, nil)
+}
+
+// MarkReadyForReview turns a draft PR into a regular one. The REST API
+// can't do this, so it goes through GraphQL.
+func (f *Forks) MarkReadyForReview(ctx context.Context, repo provider.Repo, number int) error {
+	pr, err := f.GetPullRequest(ctx, repo, number)
+	if err != nil {
+		return err
+	}
+	if !pr.Draft {
+		return nil
+	}
+	bearer, err := f.bearer(ctx, repo)
+	if err != nil {
+		return err
+	}
+	var out struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if _, err := f.gql.do(ctx, http.MethodPost, "/graphql", bearer, map[string]any{
+		"query":     `mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { clientMutationId } }`,
+		"variables": map[string]string{"id": pr.NodeID},
+	}, &out); err != nil {
+		return err
+	}
+	if len(out.Errors) > 0 {
+		return fmt.Errorf("github: mark PR #%d ready for review: %s", number, out.Errors[0].Message)
+	}
+	return nil
+}
+
+// graphQLBase maps the REST base to the GraphQL one: api.github.com stays,
+// and GitHub Enterprise's https://host/api/v3 becomes https://host/api.
+func graphQLBase(apiURL string) string {
+	base := strings.TrimRight(apiURL, "/")
+	if strings.HasSuffix(base, "/api/v3") {
+		return strings.TrimSuffix(base, "/v3")
+	}
+	return base
 }
 
 // CIStatus combines check runs (GitHub Actions and Apps) and commit

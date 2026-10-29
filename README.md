@@ -8,16 +8,16 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1–7 done.
+**Status:** V1 milestones 1–8 done.
 - **Watching:** the service polls upstream repos for new releases (or tags) and receives verified GitHub webhooks. Each new release is queued once in SQLite.
 - **License checks:** for each new release, it compares the licenses against the previous stable version.
 - **Rules:** your license rules decide what happens. A repo can be frozen at its last good version, and each version gets a merge policy for the merge engine.
 - **Merging:** each new release is merged into your fork on a staging branch, keeping history, and a PR is opened. `auto` PRs are merged once CI passes; anything else waits for you.
 - **Backups:** the source of each minor release (git history and tags, no release assets) is kept locally, pushed to your fork and mirrors, and Software Heritage is asked to archive the upstream.
 - **Early warning:** each upstream's default branch is checked between releases, so a relicense is caught before it ships and the last commit before it is backed up.
+- **Approvals:** a version that needs a human waits as an approval you resolve from the CLI or the PR. Every freeze, unfreeze, approval, override and rejection goes in an audit log.
+- **Notifications:** license warnings, approvals, reminders and sync problems go to ntfy, Gotify, email or a webhook.
 - **GitHub access:** it authenticates as a GitHub App or with a fine-grained PAT, using pluggable credential backends.
-
-Notifications land in a later milestone. Until then `notify` is recorded as pending.
 
 ## Upstream polling
 
@@ -116,20 +116,26 @@ license:
 | Action | Effect |
 |---|---|
 | `freeze` | The fork stays at the last version that passed. Takes effect immediately |
-| `block_auto_merge` | The PR is opened but never merged automatically |
-| `require_approval` | The PR is opened as a draft and merges only after you approve it |
+| `block_auto_merge` | The PR is opened but never merged automatically, unless you override it with a recorded reason |
+| `require_approval` | The PR is opened as a draft and merges only after you approve it (see [Approvals](#approvals)) |
 | `flag_pr` | The PR gets the `forkkeeper: license flagged` label |
 | `archive` | Backs up the version before the change as `forkkeeper/last-good`, whatever `archive.releases` says, and asks Software Heritage to archive the upstream |
-| `notify`, `maintenance_branch` | Carried out by later milestones; recorded as pending until then |
+| `notify` | Sends a message to your [notification channels](#notifications) |
+| `maintenance_branch` | Not implemented yet; recorded as pending |
 | `allow` | Accept the change; auto-merge stays on |
 
-Try your rules on real versions, check state, and lift a freeze:
+Rules live in the config file, so they're reviewed and versioned with it. List them, try them on
+real versions, check state, and freeze or unfreeze by hand:
 
 ```sh
+forkkeeper rules list [owner/repo]                        # rules in the order they win
 forkkeeper rules test hashicorp/terraform v1.5.5 v1.6.0   # dry run, records nothing
 forkkeeper status [owner/repo]                            # frozen repos and recent decisions
+forkkeeper freeze --reason "reviewing the CLA" owner/repo # stop syncing; --at <ref> for the last good version
 forkkeeper unfreeze --reason "upstream reverted" owner/repo
 ```
+
+A frozen repo syncs nothing, and its open sync PR isn't auto-merged.
 
 ## Merging into your fork
 
@@ -168,8 +174,8 @@ For each release that isn't frozen:
    replaces the previous one. Its body has the license check result, the merge policy and your
    local patches.
    - **Policy:** `approval_required` and `blocked` PRs are drafts, labeled `forkkeeper: needs
-     approval` or `forkkeeper: blocked`. Labels are never removed, so a newer release can't clear
-     an older concern.
+     approval` or `forkkeeper: blocked`. A newer release never clears them; only
+     [approving](#approvals) does.
 5. **Check:** every `merge.check_interval` (5m), open PRs are checked. A PR merged or closed on
    GitHub is recorded. An `auto` PR is merged once its checks pass, unless it's a draft, labeled,
    or someone else pushed to staging.
@@ -248,10 +254,84 @@ poll also checks every upstream's default branch, without merging anything from 
   arrives. Fork Keeper finds the last commit before the change (the first-parent commit before
   the one that touched the license files) and backs it up as `forkkeeper/last-open`. For Terraform
   this is `8a085b4`, the last MPL commit on main.
+- **Notified:** you get an early warning message, urgent when it froze the repo. If the release
+  will need approval, the message says so.
 - **Turning it off:** set `watcher.main_branch: false`, or `main_branch: false` on a repo.
 
 ```sh
 forkkeeper main --dry-run [owner/repo]   # check now; exit 3 if a change was found
+```
+
+## Approvals
+
+When a rule's actions include `require_approval` (or `block_auto_merge`, which needs an override),
+the version becomes an approval: a record with an ID and a snapshot of the decision (the license
+change, the rule that fired, the actions). Until it's resolved:
+
+- **Its PR waits:** the sync PR stays a draft and isn't merged.
+- **Later releases wait too:** a newer release carries the same change, so its PR is held until
+  every earlier version of that repo is approved, even when the newer one has no license change
+  of its own.
+
+```sh
+forkkeeper approvals [--all] [owner/repo]       # what's waiting
+forkkeeper approvals 12                          # one approval, with the license change
+forkkeeper approve 12                            # ready the PR; Fork Keeper merges it once CI passes
+forkkeeper approve --reason "BUSL OK for internal use" 12   # overriding block_auto_merge needs a reason
+forkkeeper reject --reason "can't ship GPL" 12   # freeze at the version before, close the PR
+```
+
+**From GitHub:** add the `forkkeeper: approved` label to the sync PR to approve every waiting version
+of that repo (handy from your phone), or merge the PR yourself: that counts as approval too.
+
+**Rejecting** freezes the fork at the last good version. Rejecting without a freeze would let the next
+release through, since it would be compared against the rejected one and show no change.
+
+**Audit log:** every freeze, unfreeze, approval, override and rejection is recorded with who did it,
+why, and the decision behind it.
+
+```sh
+forkkeeper audit [--limit n] [owner/repo]
+```
+
+## Notifications
+
+Configure any of ntfy, Gotify, email and a webhook; each message goes to all of them.
+
+```yaml
+notifications:
+  ntfy:
+    url: https://ntfy.sh/your-secret-topic   # or your own server
+    token: ntfy_token          # optional credential name
+  email:
+    smtp: smtp.example.com:587 # STARTTLS required; 465 for implicit TLS
+    username: you@example.com
+    password: smtp_password    # credential name
+    from: Fork Keeper <forkkeeper@example.com>
+    to: [you@example.com]
+  approvals: true              # also notify approvals when the rule has no notify action
+  remind_after: 72h            # remind about pending approvals; 0 turns it off
+  sync_problems: true          # merge conflicts and CI failures on sync PRs
+```
+
+| Message | When | Priority |
+|---|---|---|
+| Frozen | A rule froze a repo, on a release or on the default branch | urgent |
+| Needs approval | A version is waiting for you; with the PR link and the commands | high |
+| Early warning | A license change on the default branch, before any release ships it | high |
+| License changed | Any other rule with `notify` | default |
+| Reminder | An approval still waiting after `remind_after` | default |
+| Sync problem | A merge conflict, or CI failing on an `auto` PR | default |
+
+- **Reliable:** messages go through an outbox in the database. A failed channel is retried with
+  backoff for a day, and only that channel; a retried release doesn't notify twice.
+- **Encrypted:** URLs must be `https://`, except for localhost and private or Tailscale addresses
+  (a self-hosted server on your network). Email never falls back to an unencrypted connection.
+- **Action links:** ntfy and Gotify messages open the PR when tapped.
+
+```sh
+forkkeeper notify test   # send a test message to every channel
+forkkeeper notify list   # recent messages and whether they were sent
 ```
 
 ## Credentials
@@ -312,7 +392,7 @@ In the GitHub App (or repo webhook) settings:
 ## Layout
 
 ```
-cmd/forkkeeper/        service entrypoint (serve | healthcheck | version)
+cmd/forkkeeper/        service and CLI (serve, status, approvals, sync, archive, ...)
 config/                example config; your real config.yaml is gitignored
 deploy/caddy/          reverse proxy: TLS, exposes only /webhooks/*
 docs/                  specification

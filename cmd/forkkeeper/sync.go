@@ -13,6 +13,7 @@ import (
 
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/merge"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/pipeline"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
@@ -86,6 +87,7 @@ func syncCmd(args []string) int {
 	if !*dryRun {
 		pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, engine, log.With("component", "pipeline"))
 		pipe.ForceSync = *force
+		pipe.Notify = notify.NewQueue(db, cfg.Notifications)
 		if archiver, err := newArchiver(cfg, auth, creds, db, log.With("component", "archive")); err == nil {
 			pipe.Archiver = archiver
 		}
@@ -95,6 +97,12 @@ func syncCmd(args []string) int {
 			return 1
 		}
 		fmt.Printf("Merge policy: %s (%s)\n", out.Decision.MergePolicy, orDash(out.Decision.Reason))
+		if a := out.Approval; a != nil && a.Status == store.ApprovalPending {
+			fmt.Printf("Needs approval #%d: forkkeeper approve %d (or reject --reason \"why\" %d)\n", a.ID, a.ID, a.ID)
+		}
+		for _, a := range out.Waiting {
+			fmt.Printf("Held: %s is still waiting for approval #%d\n", a.Ref, a.ID)
+		}
 		if out.Sync == nil {
 			fmt.Printf("Not synced: %s is frozen at %s.\n", upstream.FullName(), orDash(out.State.FrozenRef))
 			return 1

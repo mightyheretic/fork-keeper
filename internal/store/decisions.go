@@ -148,11 +148,39 @@ func (s *Store) FrozenRepos(ctx context.Context) ([]RepoState, error) {
 	return out, nil
 }
 
-// Freeze freezes repo at ref. If it is already frozen, the original freeze
-// point is kept and Freeze returns false.
+// Freeze freezes repo at ref, following a license rule. If it is already
+// frozen, the original freeze point is kept and Freeze returns false.
 func (s *Store) Freeze(ctx context.Context, provider, repo, ref, reason string, decisionID int64) (bool, error) {
+	return s.freeze(ctx, provider, repo, ref, ActorForkKeeper, reason, decisionID, 0)
+}
+
+// FreezeBy freezes repo at ref by hand (or on a rejected approval, with
+// approvalID set) and records who did it and why.
+func (s *Store) FreezeBy(ctx context.Context, provider, repo, ref, actor, reason string, decisionID, approvalID int64) (bool, error) {
+	return s.freeze(ctx, provider, repo, ref, actor, reason, decisionID, approvalID)
+}
+
+func (s *Store) freeze(ctx context.Context, provider, repo, ref, actor, reason string, decisionID, approvalID int64) (bool, error) {
+	var frozen bool
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		frozen, err = s.freezeTx(ctx, tx, provider, repo, ref, actor, reason, decisionID, approvalID)
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("freeze %s: %w", repo, err)
+	}
+	return frozen, nil
+}
+
+func (s *Store) freezeTx(ctx context.Context, tx *sql.Tx, provider, repo, ref, actor, reason string,
+	decisionID, approvalID int64) (bool, error) {
 	now := s.nowMillis()
-	res, err := s.db.ExecContext(ctx, `
+	var dec sql.NullInt64
+	if decisionID != 0 {
+		dec = sql.NullInt64{Int64: decisionID, Valid: true}
+	}
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO repo_state (provider, repo, frozen, frozen_ref, frozen_at, frozen_reason, frozen_decision, updated_at)
 		VALUES (?, ?, 1, ?, ?, ?, ?, ?)
 		ON CONFLICT (provider, repo) DO UPDATE SET
@@ -160,12 +188,20 @@ func (s *Store) Freeze(ctx context.Context, provider, repo, ref, reason string, 
 			frozen_reason = excluded.frozen_reason, frozen_decision = excluded.frozen_decision,
 			updated_at = excluded.updated_at
 		WHERE repo_state.frozen = 0`,
-		provider, repo, ref, now, reason, decisionID, now)
+		provider, repo, ref, now, reason, dec, now)
 	if err != nil {
-		return false, fmt.Errorf("freeze %s: %w", repo, err)
+		return false, err
 	}
-	n, _ := res.RowsAffected()
-	return n == 1, nil
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, nil
+	}
+	snap, err := decisionContext(ctx, tx, decisionID)
+	if err != nil {
+		return false, err
+	}
+	return true, addAudit(ctx, tx, AuditEntry{Provider: provider, Repo: repo, Ref: ref, Kind: AuditFreeze, Actor: actor,
+		Reason: reason, Detail: "frozen at " + orNone(ref), DecisionID: decisionID, ApprovalID: approvalID,
+		Context: snap}, now)
 }
 
 // Unfreeze lifts a freeze and records who did it and why. It returns false
@@ -174,8 +210,9 @@ func (s *Store) Unfreeze(ctx context.Context, provider, repo, actor, reason stri
 	var unfrozen bool
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		var ref string
-		err := tx.QueryRowContext(ctx, `SELECT COALESCE(frozen_ref, '') FROM repo_state
-			WHERE provider = ? AND repo = ? AND frozen = 1`, provider, repo).Scan(&ref)
+		var decision sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT COALESCE(frozen_ref, ''), frozen_decision FROM repo_state
+			WHERE provider = ? AND repo = ? AND frozen = 1`, provider, repo).Scan(&ref, &decision)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -187,16 +224,24 @@ func (s *Store) Unfreeze(ctx context.Context, provider, repo, actor, reason stri
 			WHERE provider = ? AND repo = ?`, now, provider, repo); err != nil {
 			return err
 		}
-		detail := fmt.Sprintf("unfrozen (was frozen at %s): %s", ref, reason)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO repo_events (provider, repo, kind, detail, actor, created_at)
-			VALUES (?, ?, 'unfreeze', ?, ?, ?)`, provider, repo, detail, actor, now); err != nil {
+		snap, err := decisionContext(ctx, tx, decision.Int64)
+		if err != nil {
 			return err
 		}
 		unfrozen = true
-		return nil
+		return addAudit(ctx, tx, AuditEntry{Provider: provider, Repo: repo, Ref: ref, Kind: AuditUnfreeze, Actor: actor,
+			Reason: reason, Detail: "unfrozen (was frozen at " + orNone(ref) + ")", DecisionID: decision.Int64,
+			Context: snap}, now)
 	})
 	if err != nil {
 		return false, fmt.Errorf("unfreeze %s: %w", repo, err)
 	}
 	return unfrozen, nil
+}
+
+func orNone(ref string) string {
+	if ref == "" {
+		return "no version"
+	}
+	return ref
 }

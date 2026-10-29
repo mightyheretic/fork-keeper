@@ -16,6 +16,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/git"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -23,14 +24,15 @@ import (
 
 // fakeHost serves repos from local directories and keeps PRs in memory.
 type fakeHost struct {
-	mu     sync.Mutex
-	dirs   map[string]string // full name -> path
-	prs    []*provider.PullRequest
-	heads  map[int]string // PR number -> head branch
-	bases  map[int]string
-	bodies map[int]string
-	ci     provider.CIStatus
-	merged []int
+	mu       sync.Mutex
+	dirs     map[string]string // full name -> path
+	prs      []*provider.PullRequest
+	heads    map[int]string // PR number -> head branch
+	bases    map[int]string
+	bodies   map[int]string
+	ci       provider.CIStatus
+	merged   []int
+	comments []string
 }
 
 func (h *fakeHost) CloneURL(repo provider.Repo) string { return h.dirs[repo.FullName()] }
@@ -95,6 +97,34 @@ func (h *fakeHost) MergePullRequest(_ context.Context, _ provider.Repo, n int, s
 	defer h.mu.Unlock()
 	h.merged = append(h.merged, n)
 	h.prs[n-1].Merged, h.prs[n-1].State = true, "closed"
+	return nil
+}
+
+func (h *fakeHost) RemoveLabel(_ context.Context, _ provider.Repo, n int, label string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.prs[n-1].Labels = slices.DeleteFunc(h.prs[n-1].Labels, func(l string) bool { return l == label })
+	return nil
+}
+
+func (h *fakeHost) MarkReadyForReview(_ context.Context, _ provider.Repo, n int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.prs[n-1].Draft = false
+	return nil
+}
+
+func (h *fakeHost) Comment(_ context.Context, _ provider.Repo, n int, body string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.comments = append(h.comments, body)
+	return nil
+}
+
+func (h *fakeHost) ClosePullRequest(_ context.Context, _ provider.Repo, n int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.prs[n-1].State = "closed"
 	return nil
 }
 
@@ -410,6 +440,8 @@ func TestReconcilerAutoMerge(t *testing.T) {
 	res := e.sync("v2", "v1", rules.MergeAuto, "")
 	ctx := context.Background()
 	r := NewReconciler(map[string]provider.ForkHost{"github": e.host}, e.store, slog.New(slog.DiscardHandler))
+	notices := &fakeNotifier{}
+	r.Notify = notices
 	e.host.prs[0].HeadSHA = res.HeadSHA
 
 	status := func() store.Sync {
@@ -432,13 +464,29 @@ func TestReconcilerAutoMerge(t *testing.T) {
 			t.Fatalf("CI %s: %+v merged=%v", tc.ci.State, s, e.host.merged)
 		}
 	}
+	if len(notices.n) != 1 || notices.n[0].Message.Kind != notify.KindSync || !strings.Contains(notices.n[0].Message.Body, "test") {
+		t.Fatalf("CI failure notices = %+v", notices.n)
+	}
+	// A frozen repo's PR isn't merged, even when CI passes.
 	e.host.ci = provider.CIStatus{State: provider.CISuccess, Total: 2}
+	e.store.FreezeBy(ctx, "github", "up/app", "v1", "test", "hold", 0, 0)
+	if err := r.Once(ctx); err != nil || len(e.host.merged) != 0 || !strings.Contains(status().Detail, "frozen") {
+		t.Fatalf("frozen: %v merged=%v %+v", err, e.host.merged, status())
+	}
+	e.store.Unfreeze(ctx, "github", "up/app", "test", "ok")
 	if err := r.Once(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if s := status(); s.Status != store.SyncMerged || !slices.Equal(e.host.merged, []int{1}) {
 		t.Fatalf("after CI success: %+v merged=%v", s, e.host.merged)
 	}
+}
+
+type fakeNotifier struct{ n []notify.Notice }
+
+func (f *fakeNotifier) Notify(_ context.Context, n notify.Notice) (bool, error) {
+	f.n = append(f.n, n)
+	return true, nil
 }
 
 func TestReconcilerNoticesManualMergeAndClose(t *testing.T) {

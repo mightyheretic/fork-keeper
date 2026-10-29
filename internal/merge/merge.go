@@ -25,8 +25,8 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/store"
 )
 
-// PR labels. Approval and blocked labels stop auto-merge; they are never
-// removed by Fork Keeper, so a newer release can't clear an older concern.
+// PR labels. Approval and blocked labels stop auto-merge. A newer release
+// never clears them; only approving every pending version does.
 const (
 	LabelSync     = "forkkeeper"
 	LabelApproval = "forkkeeper: needs approval"

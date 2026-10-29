@@ -92,19 +92,22 @@ The license gate compares the SPDX identifier, the LICENSE file and per-file hea
 - The local archive (a bare repository per upstream) only gains refs: a tag upstream later moves or deletes keeps its original commit.
 - Copies: every backed-up ref is pushed to the fork and to any mirrors (another provider), under hidden `refs/forkkeeper/archive/` refs by default so they never trigger CI; a dedicated backup repo can take plain tags. Software Heritage is asked to archive the upstream (at most daily, always on a license change).
 - On a license change (a freeze, or the `archive` rule action) the version before it is backed up as `forkkeeper/last-good`, whatever the policy.
-- Main-branch early warning: relicensing usually lands on the default branch weeks or months before a release ships it (Terraform, Redis, Elasticsearch). Watch-only, never merged: when the upstream's default-branch head moves and its root license files or manifests changed, check only its top-level license. On a change, apply license rules early (a freeze takes effect before the release arrives), record the decision against `main@<sha>`, and back up the last first-parent commit before the change as `forkkeeper/last-open`. Notification follows with milestone 8. Sub-licenses on main are ignored.
+- Main-branch early warning: relicensing usually lands on the default branch weeks or months before a release ships it (Terraform, Redis, Elasticsearch). Watch-only, never merged: when the upstream's default-branch head moves and its root license files or manifests changed, check only its top-level license. On a change, apply license rules early (a freeze takes effect before the release arrives), record the decision against `main@<sha>`, and back up the last first-parent commit before the change as `forkkeeper/last-open`. An early-warning notification is sent. Sub-licenses on main are ignored.
 - `forkkeeper archive` backs up past releases on demand.
 
 ### 4.5 Approvals and Notifications
 
-- Approvals are persistent objects with an ID, a context snapshot (diff, license change, rule that fired), and an expiry or reminder.
-- V1: resolve through CLI and PR comments or labels.
+- Approvals are persistent objects with an ID, a context snapshot (diff, license change, rule that fired), and reminders (no expiry: an unanswered approval never resolves itself).
+- `require_approval` creates an approval; `block_auto_merge` creates one that needs an override with a recorded reason. Default-branch decisions don't: the release that ships the change does.
+- While a version waits, later releases of that repo wait too (they carry the same change); their PRs are held until every earlier version is approved.
+- Approving makes the sync PR mergeable (ready for review, approval labels removed) and auto-merge applies once CI passes. Rejecting freezes the fork at the version before and closes the PR; without the freeze, the next release would be compared against the rejected one and pass.
+- V1: resolve through the CLI (`approvals`, `approve`, `reject`) or on the PR: the `forkkeeper: approved` label, or merging it by hand.
 - V2: web UI.
-- Notification channel should support action links (ntfy, Gotify, or email with deep links).
+- Notification channels: ntfy, Gotify, email (TLS required), webhook. Messages go through an outbox with per-channel retry and dedupe. ntfy and Gotify messages link to the PR; approve-from-notification buttons wait for the V2 API, which needs authentication.
 
 ### 4.6 Audit Log
 
-Record every override, approval, rejection, freeze and unfreeze, with timestamp, rule that fired and context. These are license decisions you may need to justify later.
+Record every override, approval, rejection, freeze and unfreeze, with timestamp, actor, reason, rule that fired and a context snapshot. These are license decisions you may need to justify later. `forkkeeper audit` shows them.
 
 ## 5. API-First Design
 

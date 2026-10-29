@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/mightyheretic/fork-keeper/internal/archive"
@@ -13,6 +14,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/license"
 	"github.com/mightyheretic/fork-keeper/internal/merge"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -245,5 +247,93 @@ func TestBacksUpReleasesAndLastGoodVersion(t *testing.T) {
 		if d.Ref == "v2.0.0" && !slices.Equal(d.Pending, []string{"notify"}) {
 			t.Fatalf("archive should be done: %+v", d)
 		}
+	}
+}
+
+type fakeNotifier struct{ notices []notify.Notice }
+
+func (f *fakeNotifier) Notify(_ context.Context, n notify.Notice) (bool, error) {
+	f.notices = append(f.notices, n)
+	return true, nil
+}
+
+func TestApprovalHoldsLaterVersions(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := config.Parse([]byte(`
+credentials: {provider: env}
+repos:
+  - upstream: up/app
+    fork: me/app
+license:
+  allowlist: [MIT, GPL-3.0-only]
+  rules:
+    - name: to-gpl
+      from: [MIT]
+      to: [GPL-*]
+      actions: [require_approval, notify]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	syncer := &fakeSyncer{}
+	g := fakeGate{
+		"v2": result("v1", []string{"MIT"}, []string{"GPL-3.0-only"}, "v2"),
+		"v3": result("v2", []string{"GPL-3.0-only"}, []string{"GPL-3.0-only"}, "v3"),
+	}
+	p := New(cfg, g, rules.New(cfg), s, syncer, slog.New(slog.DiscardHandler))
+	n := &fakeNotifier{}
+	p.Notify = n
+
+	out, err := p.Run(ctx, event("v2"))
+	if err != nil || out.Approval == nil || out.Approval.Status != store.ApprovalPending || out.Approval.Kind != store.ApprovalNeeded {
+		t.Fatalf("v2: %+v %v", out.Approval, err)
+	}
+	if syncer.reqs[0].Decision.MergePolicy != rules.MergeApproval {
+		t.Fatalf("v2 policy = %s", syncer.reqs[0].Decision.MergePolicy)
+	}
+	if len(n.notices) != 1 || n.notices[0].DecisionID == 0 || n.notices[0].Message.Priority != notify.PriorityHigh ||
+		!strings.Contains(n.notices[0].Message.Body, "forkkeeper approve") {
+		t.Fatalf("notices = %+v", n.notices)
+	}
+
+	// v3 has no license change of its own, but carries v2's: it waits too.
+	out, err = p.Run(ctx, event("v3"))
+	if err != nil || out.Approval != nil || len(out.Waiting) != 1 || out.Waiting[0].Ref != "v2" {
+		t.Fatalf("v3: %+v %v", out, err)
+	}
+	if d := syncer.reqs[1].Decision; d.MergePolicy != rules.MergeApproval || !strings.Contains(d.Reason, "v2") {
+		t.Fatalf("v3 decision = %+v", d)
+	}
+	if len(n.notices) != 1 {
+		t.Fatalf("v3 notified: %+v", n.notices[1:])
+	}
+
+	// Once v2 is approved, re-running it syncs with auto-merge.
+	if _, err := s.ResolveApproval(ctx, out.Waiting[0].ID, store.Resolution{Approve: true, Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(ctx, event("v2")); err != nil {
+		t.Fatal(err)
+	}
+	if d := syncer.reqs[2].Decision; d.MergePolicy != rules.MergeAuto {
+		t.Fatalf("approved v2 policy = %s", d.MergePolicy)
+	}
+}
+
+func TestFreezeNotifiesUrgently(t *testing.T) {
+	p, _ := setup(t, fakeGate{"v3": result("v2", []string{"MIT"}, []string{"BUSL-1.1"}, "v3")})
+	n := &fakeNotifier{}
+	p.Notify = n
+	if _, err := p.Run(context.Background(), event("v3")); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.notices) != 1 || n.notices[0].Message.Priority != notify.PriorityUrgent ||
+		!strings.HasPrefix(n.notices[0].Message.Title, "FROZEN") || !strings.Contains(n.notices[0].Message.Body, "frozen at v2") {
+		t.Fatalf("notices = %+v", n.notices)
 	}
 }

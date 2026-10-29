@@ -16,6 +16,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/mainwatch"
+	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -300,6 +301,9 @@ func mainCmd(args []string) int {
 		return 1
 	}
 	w := newMainWatcher(cfg, auth, db, licenseGate, archiver, log.With("component", "mainwatch"))
+	if !*dryRun {
+		w.Notify = notify.NewQueue(db, cfg.Notifications)
+	}
 
 	code := 0
 	for _, t := range targets {
