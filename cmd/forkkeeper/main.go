@@ -15,16 +15,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mightyheretic/fork-keeper/internal/archive"
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/git"
+	"github.com/mightyheretic/fork-keeper/internal/mainwatch"
 	"github.com/mightyheretic/fork-keeper/internal/merge"
 	"github.com/mightyheretic/fork-keeper/internal/pipeline"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
+	"github.com/mightyheretic/fork-keeper/internal/swh"
 	"github.com/mightyheretic/fork-keeper/internal/watcher"
 	"github.com/mightyheretic/fork-keeper/internal/webhook"
 	"github.com/mightyheretic/fork-keeper/internal/worker"
@@ -63,12 +66,16 @@ func main() {
 		os.Exit(syncCmd(os.Args[2:]))
 	case "fork":
 		os.Exit(forkCmd(os.Args[2:]))
+	case "archive":
+		os.Exit(archiveCmd(os.Args[2:]))
+	case "main":
+		os.Exit(mainCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, sync, fork, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, sync, fork, archive, main, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -238,13 +245,63 @@ func repoToken(cfg *config.Config, auth *github.Auth) github.TokenFunc {
 // data lives under <data_dir>/git.
 func newMergeEngine(cfg *config.Config, auth *github.Auth, st merge.Store, log *slog.Logger) (*merge.Engine, map[string]provider.ForkHost, error) {
 	hosts := map[string]provider.ForkHost{github.Name: github.NewForks(cfg.GitHub.APIURL, repoToken(cfg, auth), nil)}
-	dir := filepath.Join(cfg.DataDir, "git")
-	home := filepath.Join(dir, "home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("create git dir: %w", err)
+	runner, err := newGitRunner(cfg)
+	if err != nil {
+		return nil, nil, err
 	}
-	runner := &git.Runner{Home: home, Identity: git.Identity{Name: cfg.Merge.CommitterName, Email: cfg.Merge.CommitterEmail}}
-	return merge.New(hosts, st, runner, dir, log), hosts, nil
+	return merge.New(hosts, st, runner, filepath.Join(cfg.DataDir, "git"), log), hosts, nil
+}
+
+func newGitRunner(cfg *config.Config) (*git.Runner, error) {
+	home := filepath.Join(cfg.DataDir, "git", "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return nil, fmt.Errorf("create git dir: %w", err)
+	}
+	return &git.Runner{Home: home, Identity: git.Identity{Name: cfg.Merge.CommitterName, Email: cfg.Merge.CommitterEmail}}, nil
+}
+
+// newArchiver returns the source backup archiver. Backups live under
+// <data_dir>/archive.
+func newArchiver(cfg *config.Config, auth *github.Auth, creds credentials.Provider, st archive.Store, log *slog.Logger) (*archive.Archiver, error) {
+	runner, err := newGitRunner(cfg)
+	if err != nil {
+		return nil, err
+	}
+	hosts := map[string]provider.GitRemote{github.Name: github.NewForks(cfg.GitHub.APIURL, repoToken(cfg, auth), nil)}
+	var token func(context.Context) (credentials.Secret, error)
+	if name := cfg.Archive.SoftwareHeritageToken; name != "" {
+		token = func(ctx context.Context) (credentials.Secret, error) { return creds.Get(ctx, name) }
+	}
+	saver := swh.New(cfg.Archive.SoftwareHeritageURL, token, nil)
+	return archive.New(hosts, st, runner, filepath.Join(cfg.DataDir, "archive"), creds, saver, log), nil
+}
+
+// mainTargets lists the upstreams whose default branch is watched.
+func mainTargets(cfg *config.Config) []mainwatch.Target {
+	var out []mainwatch.Target
+	for _, r := range cfg.Repos {
+		if !cfg.WatchesMainBranch(r) {
+			continue
+		}
+		repo, err := provider.ParseRepo(r.Upstream)
+		if err != nil {
+			continue
+		}
+		kind := provider.KindRelease
+		if r.Watch == config.WatchTags {
+			kind = provider.KindTag
+		}
+		out = append(out, mainwatch.Target{Provider: github.Name, Repo: repo, Kind: kind, Config: r})
+	}
+	return out
+}
+
+func newMainWatcher(cfg *config.Config, auth *github.Auth, st mainwatch.Store, reports mainwatch.Reporter,
+	archiver mainwatch.Archiver, log *slog.Logger) *mainwatch.Watcher {
+	readers := map[string]provider.BranchReader{github.Name: github.NewRefs(cfg.GitHub.APIURL, upstreamToken(cfg, auth), nil)}
+	w := mainwatch.New(cfg, readers, st, reports, rules.New(cfg), archiver, mainTargets(cfg), log)
+	w.Interval = cfg.Watcher.PollInterval
+	return w
 }
 
 func hasForks(cfg *config.Config) bool {
@@ -275,6 +332,9 @@ func warnAnonymousQuota(cfg *config.Config, log *slog.Logger) {
 		reqs := 1.0
 		if r.Watch == config.WatchTags {
 			reqs = 3 // up to maxTagPages
+		}
+		if cfg.WatchesMainBranch(r) {
+			reqs += 2 // head, plus the root listing when it moved
 		}
 		perHour += reqs * polls
 	}
@@ -387,7 +447,18 @@ func serve() error {
 	licenseGate := gate.New(db, map[string]provider.ArchiveFetcher{
 		github.Name: github.NewArchives(cfg.GitHub.APIURL, upstreamToken(cfg, auth)),
 	}, log.With("component", "gate"))
+	archiver, err := newArchiver(cfg, auth, creds, db, log.With("component", "archive"))
+	if err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		log.Error("git is not installed; source backups are off", "err", err)
+		archiver = nil
+	}
 	pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, syncer, log.With("component", "pipeline"))
+	if archiver != nil {
+		pipe.Archiver = archiver
+	}
 	w := worker.New(db, pipe.Process, log.With("component", "worker"))
 
 	webhookSecret := func() ([]byte, error) {
@@ -437,6 +508,17 @@ func serve() error {
 		poller.Run(ctx)
 	}()
 
+	var mainArchiver mainwatch.Archiver
+	if archiver != nil {
+		mainArchiver = archiver
+	}
+	mainWatcher := newMainWatcher(cfg, auth, db, licenseGate, mainArchiver, log.With("component", "mainwatch"))
+	mainDone := make(chan struct{})
+	go func() {
+		defer close(mainDone)
+		mainWatcher.Run(ctx)
+	}()
+
 	reconcilerDone := make(chan struct{})
 	go func() {
 		defer close(reconcilerDone)
@@ -473,6 +555,7 @@ func serve() error {
 	}
 	<-workerDone
 	<-pollerDone
+	<-mainDone
 	<-reconcilerDone
 	return runErr
 }

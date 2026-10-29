@@ -48,6 +48,10 @@ watcher:
   # github.repo_auth is applied to each upstream name, else anonymous. A
   # fine-grained PAT with read access to public repos is the simplest choice.
   # auth: personal
+  # Early warning: also check each upstream's default branch for top-level
+  # license changes between releases (nothing from it is merged). Repos can
+  # override it with main_branch: false.
+  main_branch: true
 
 # Merge engine: merges each new release into repos[].fork on a staging
 # branch and opens a PR into the stable branch.
@@ -57,6 +61,21 @@ merge:
   check_interval: 5m      # how often open sync PRs are checked
   committer_name: Fork Keeper
   committer_email: forkkeeper@localhost
+
+# Source backups of upstream releases: git history and tags, never release
+# assets. Kept under <data_dir>/archive; tags are only ever added, so a tag
+# upstream moves or deletes keeps its original commit.
+archive:
+  releases: minor          # major (X.0.0) | minor (X.Y.0) | all | none
+  push_to_fork: true       # copy backups to the fork, under hidden refs/forkkeeper/archive/
+  software_heritage: true  # ask Software Heritage to archive the upstream (at most daily)
+  # software_heritage_token: swh_token   # optional credential name
+  mirrors: []
+  # mirrors:
+  #   - url: https://codeberg.org/your-user/{name}.git   # {owner}, {name} filled in
+  #     token: codeberg_token                            # credential name
+  #     username: your-user    # default x-access-token (GitHub); GitLab: oauth2
+  #     refs: hidden           # hidden (default) | tags (dedicated backup repo)
 
 notifications:
   ntfy:
@@ -78,8 +97,8 @@ notifications:
 #   removed: licenses dropped in the new version (a rule needs to and/or removed)
 # Patterns: SPDX IDs, globs (GPL-*), any, not-allowed (outside the allowlist),
 # unknown (no license, or one that couldn't be identified).
-# Actions: freeze, block_auto_merge, require_approval, flag_pr, notify, archive,
-#          maintenance_branch, allow.
+# Actions: freeze, block_auto_merge, require_approval, flag_pr, notify, archive
+#          (back up the version before the change), maintenance_branch, allow.
 # Scope: repos: [...] or groups: [...]; neither means global. The most specific
 # matching rule wins (repo > group > global, then priority, then file order).
 license:
@@ -120,6 +139,8 @@ repos:
     # patch-stack: always re-apply local patches on top of upstream (alias: rebase)
     # merge-only: merge, and report conflicts without trying the patch stack
     merge_strategy: merge
-    archive:
-      mirrors: []
+    # main_branch: false            # overrides watcher.main_branch
+    archive:                        # overrides the top-level archive settings
+      releases: minor
+      mirrors: []                   # added to the top-level mirrors
       software_heritage: true

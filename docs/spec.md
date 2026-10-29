@@ -88,10 +88,12 @@ The license gate compares the SPDX identifier, the LICENSE file and per-file hea
 
 ### 4.4 Archival Backup
 
-- Mirror each fork to a second provider and/or Software Heritage, so a deleted or tampered upstream cannot take your copy with it.
-- Back up the source of each release (every major, optionally minors): git history and tags only, never release assets or binaries. Releases, not commits on the default branch, are the sync and backup points.
-- Main-branch early warning: relicensing usually lands on the default branch weeks or months before a release ships it (Terraform, Redis, Elasticsearch). Watch-only, never merged: when the upstream's default-branch head moves, check only its top-level license. On a change, notify ("relicense on main, not yet released"), tag the last commit before the change in the fork and the source backup (`forkkeeper/last-open`), and apply license rules early, so a freeze takes effect before the release arrives. Sub-licenses on main are ignored.
-- Triggered on schedule and by the "snapshot to archive" rule action.
+- Back up the source of upstream releases: git history and tags only, never release assets or binaries. Releases, not commits on the default branch, are the sync and backup points. Policy per repo: `major` (X.0.0, and 0.Y.0 before 1.0), `minor` (X.Y.0, default), `all` or `none`; pre-releases never.
+- The local archive (a bare repository per upstream) only gains refs: a tag upstream later moves or deletes keeps its original commit.
+- Copies: every backed-up ref is pushed to the fork and to any mirrors (another provider), under hidden `refs/forkkeeper/archive/` refs by default so they never trigger CI; a dedicated backup repo can take plain tags. Software Heritage is asked to archive the upstream (at most daily, always on a license change).
+- On a license change (a freeze, or the `archive` rule action) the version before it is backed up as `forkkeeper/last-good`, whatever the policy.
+- Main-branch early warning: relicensing usually lands on the default branch weeks or months before a release ships it (Terraform, Redis, Elasticsearch). Watch-only, never merged: when the upstream's default-branch head moves and its root license files or manifests changed, check only its top-level license. On a change, apply license rules early (a freeze takes effect before the release arrives), record the decision against `main@<sha>`, and back up the last first-parent commit before the change as `forkkeeper/last-open`. Notification follows with milestone 8. Sub-licenses on main are ignored.
+- `forkkeeper archive` backs up past releases on demand.
 
 ### 4.5 Approvals and Notifications
 

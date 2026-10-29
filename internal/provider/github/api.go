@@ -53,6 +53,7 @@ type request struct {
 	bearer string // never included in errors
 	body   any
 	etag   string // sent as If-None-Match
+	accept string // default application/vnd.github+json
 }
 
 // response is a completed API call.
@@ -80,7 +81,11 @@ func (c *apiClient) send(ctx context.Context, r request, out any) (response, err
 	if err != nil {
 		return response{}, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	accept := r.accept
+	if accept == "" {
+		accept = "application/vnd.github+json"
+	}
+	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", apiVersion)
 	req.Header.Set("User-Agent", c.userAgent)
 	if r.bearer != "" {
@@ -120,6 +125,10 @@ func (c *apiClient) send(ctx context.Context, r request, out any) (response, err
 			e.Message = http.StatusText(httpResp.StatusCode)
 		}
 		return resp, &APIError{Status: httpResp.StatusCode, Method: r.method, Path: r.path, Message: e.Message}
+	}
+	if raw, ok := out.(*[]byte); ok {
+		*raw = data
+		return resp, nil
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {

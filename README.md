@@ -8,15 +8,16 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1–6 done.
+**Status:** V1 milestones 1–7 done.
 - **Watching:** the service polls upstream repos for new releases (or tags) and receives verified GitHub webhooks. Each new release is queued once in SQLite.
 - **License checks:** for each new release, it compares the licenses against the previous stable version.
 - **Rules:** your license rules decide what happens. A repo can be frozen at its last good version, and each version gets a merge policy for the merge engine.
 - **Merging:** each new release is merged into your fork on a staging branch, keeping history, and a PR is opened. `auto` PRs are merged once CI passes; anything else waits for you.
+- **Backups:** the source of each minor release (git history and tags, no release assets) is kept locally, pushed to your fork and mirrors, and Software Heritage is asked to archive the upstream.
+- **Early warning:** each upstream's default branch is checked between releases, so a relicense is caught before it ships and the last commit before it is backed up.
 - **GitHub access:** it authenticates as a GitHub App or with a fine-grained PAT, using pluggable credential backends.
 
-Archiving and notifications land in later milestones. Until then those actions are recorded
-as pending.
+Notifications land in a later milestone. Until then `notify` is recorded as pending.
 
 ## Upstream polling
 
@@ -118,7 +119,8 @@ license:
 | `block_auto_merge` | The PR is opened but never merged automatically |
 | `require_approval` | The PR is opened as a draft and merges only after you approve it |
 | `flag_pr` | The PR gets the `forkkeeper: license flagged` label |
-| `notify`, `archive`, `maintenance_branch` | Carried out by later milestones; recorded as pending until then |
+| `archive` | Backs up the version before the change as `forkkeeper/last-good`, whatever `archive.releases` says, and asks Software Heritage to archive the upstream |
+| `notify`, `maintenance_branch` | Carried out by later milestones; recorded as pending until then |
 | `allow` | Accept the change; auto-merge stays on |
 
 Try your rules on real versions, check state, and lift a freeze:
@@ -190,6 +192,67 @@ forkkeeper sync junegunn/fzf v0.74.5             # what the service does for a n
   fsmonitor and submodule recursion, and allows only HTTPS remotes.
 - **Tokens stay hidden:** they're passed through the environment for that one command, never in
   arguments or saved remote URLs.
+
+## Source backups
+
+Releases are the backup points: Fork Keeper keeps the source of upstream releases, as git
+history and tags. It never downloads release assets or binaries.
+
+```yaml
+archive:
+  releases: minor            # major (X.0.0) | minor (X.Y.0, default) | all | none
+  push_to_fork: true         # copy backups to the repo's fork (default)
+  software_heritage: true    # ask Software Heritage to archive the upstream (default)
+  # software_heritage_token: swh_token   # optional credential, for higher rate limits
+  mirrors:                   # optional extra copies, e.g. on another host
+    - url: https://codeberg.org/you/{name}.git   # {owner} and {name} are filled in
+      token: codeberg_token  # credential name
+      username: you          # Codeberg/Gitea: your user; GitLab: oauth2; GitHub: default
+      refs: hidden           # hidden (default) | tags (for a dedicated backup repo)
+```
+
+- **What is kept:** each backed-up tag in a bare repository under `<data_dir>/archive`. Tags are
+  only ever added: if upstream later moves or deletes a tag, the backup keeps the original commit.
+- **Before 1.0:** `major` counts `0.Y.0` releases, since a minor bump is the breaking one there.
+  Pre-releases are never backed up.
+- **On a license change:** the version before it is always backed up as `forkkeeper/last-good`
+  (with the `archive` action, or when a rule freezes the repo), even if it is a patch release.
+- **Where copies go:** the fork and mirrors get every backed-up ref on each backup, so a failed
+  push is retried next time. By default they go under `refs/forkkeeper/archive/`. These refs don't
+  appear as tags or branches and never trigger CI, since a pushed upstream tag would otherwise
+  run upstream's release workflows. To fetch them:
+  `git fetch <fork> 'refs/forkkeeper/archive/*:refs/forkkeeper/archive/*'`.
+- **Software Heritage:** asked at most once a day per upstream, and always on a license change.
+- **Repo overrides:** each repo can set its own `archive:` (`releases`, `push_to_fork`,
+  `software_heritage`, and extra `mirrors`).
+
+Back up past releases, or list what is backed up:
+
+```sh
+forkkeeper archive --dry-run morluto/rea     # tags the policy would back up
+forkkeeper archive morluto/rea               # back them up now
+forkkeeper archive morluto/rea v1.2.3        # specific tags
+forkkeeper archive list [owner/repo]         # backups, pushes, Software Heritage requests
+```
+
+## Default-branch early warning
+
+Relicensing usually lands on the default branch weeks or months before a release ships it.
+Terraform's BUSL commit was on main from August 2023, and v1.6.0 shipped in October. So each
+poll also checks every upstream's default branch, without merging anything from it:
+
+- **Cheap:** if the head hasn't moved, the check costs nothing (a 304). If it moved, Fork Keeper
+  lists the root directory and reads the root license files and manifests, only when they changed.
+- **Top-level only:** nested license files and headers on the default branch are ignored.
+- **On a change:** the license rules run right away, so a freeze takes effect before the release
+  arrives. Fork Keeper finds the last commit before the change (the first-parent commit before
+  the one that touched the license files) and backs it up as `forkkeeper/last-open`. For Terraform
+  this is `8a085b4`, the last MPL commit on main.
+- **Turning it off:** set `watcher.main_branch: false`, or `main_branch: false` on a repo.
+
+```sh
+forkkeeper main --dry-run [owner/repo]   # check now; exit 3 if a change was found
+```
 
 ## Credentials
 

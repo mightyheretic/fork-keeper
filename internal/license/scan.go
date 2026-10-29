@@ -352,3 +352,49 @@ var sourceExts = map[string]bool{
 func isSourceFile(base string) bool { return sourceExts[strings.ToLower(path.Ext(base))] }
 
 func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
+
+// TopLevelPath reports whether the file at p (relative to the tree root)
+// can affect the top-level license: a root license file, a root manifest,
+// or a file in a top-level LICENSES/ directory. A scan of only these files
+// yields the same top-level result as a full scan.
+func TopLevelPath(p string) bool {
+	dir, base := path.Split(p)
+	switch {
+	case dir == "":
+		return isLicenseFile(dir, base) || manifestParsers[base] != nil
+	case IsLicensesDir(strings.TrimSuffix(dir, "/")):
+		return isLicenseFile(dir, base)
+	}
+	return false
+}
+
+// IsLicensesDir reports whether a top-level directory name is a REUSE-style
+// LICENSES/ directory.
+func IsLicensesDir(name string) bool { return strings.EqualFold(name, "LICENSES") }
+
+// TopLevel returns a copy of r with only what determines the project's own
+// license: root license files and manifests. Comparing two TopLevel
+// reports shows top-level changes only.
+func (r *Report) TopLevel() *Report {
+	t := *r
+	t.Files = slices.DeleteFunc(slices.Clone(r.Files), func(f FileFinding) bool { return !f.Root })
+	t.Manifests = slices.Clone(r.Manifests)
+	t.Licenses = slices.Clone(r.Licenses)
+	t.Headers = HeaderSummary{ByLicense: map[string]int{}, Files: map[string]string{}}
+	t.Warnings = nil
+	return &t
+}
+
+// TopLevelPaths lists the root license files and manifests in r.
+func (r *Report) TopLevelPaths() []string {
+	var out []string
+	for _, f := range r.Files {
+		if f.Root {
+			out = append(out, f.Path)
+		}
+	}
+	for _, m := range r.Manifests {
+		out = append(out, m.Path)
+	}
+	return out
+}

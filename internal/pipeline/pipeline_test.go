@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/mightyheretic/fork-keeper/internal/archive"
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/license"
@@ -190,5 +191,59 @@ func TestSkipsAndPermanentErrors(t *testing.T) {
 	var perm interface{ Unwrap() error }
 	if !errors.As(err, &perm) || !errors.Is(err, provider.ErrRefNotFound) {
 		t.Fatalf("err = %v, want a permanent ErrRefNotFound", err)
+	}
+}
+
+type fakeArchiver struct{ reqs []archive.Request }
+
+func (f *fakeArchiver) Backup(_ context.Context, req archive.Request) (archive.Result, error) {
+	f.reqs = append(f.reqs, req)
+	return archive.Result{Added: append(req.Tags, req.LastGood)}, nil
+}
+
+func TestBacksUpReleasesAndLastGoodVersion(t *testing.T) {
+	ctx := context.Background()
+	p, s := setupWith(t, fakeGate{
+		"v1.0.0": result("", nil, []string{"MIT"}, "v1.0.0"),
+		"v1.0.1": result("v1.0.0", []string{"MIT"}, []string{"MIT"}, "v1.0.1"),
+		"v1.1.0": result("v1.0.1", []string{"MIT"}, []string{"MIT"}, "v1.1.0"),
+		"v1.1.1": result("v1.1.0", []string{"MIT"}, []string{"MIT"}, "v1.1.1"),
+		"v2.0.0": result("v1.1.1", []string{"MIT"}, []string{"BUSL-1.1"}, "v2.0.0"),
+		"v2.1.0": result("v2.0.0", []string{"BUSL-1.1"}, []string{"BUSL-1.1"}, "v2.1.0"),
+	}, "me/app", &fakeSyncer{})
+	arch := &fakeArchiver{}
+	p.Archiver = arch
+
+	for _, tag := range []string{"v1.0.0", "v1.0.1", "v1.1.0", "v1.1.1", "v2.0.0", "v2.1.0"} {
+		if _, err := p.Run(ctx, event(tag)); err != nil {
+			t.Fatalf("%s: %v", tag, err)
+		}
+	}
+	// The default policy (minor) backs up X.Y.0 releases; the relicense
+	// backs up the version before it, a patch release, as the last good
+	// one; nothing is backed up once frozen.
+	var got []string
+	for _, r := range arch.reqs {
+		if r.Fork != "me/app" || !r.Settings.PushToFork {
+			t.Fatalf("request: %+v", r)
+		}
+		for _, tag := range r.Tags {
+			got = append(got, tag)
+		}
+		if r.LastGood != "" {
+			got = append(got, "last-good:"+r.LastGood)
+			if !r.Urgent {
+				t.Fatal("license change backup should be urgent")
+			}
+		}
+	}
+	if want := []string{"v1.0.0", "v1.1.0", "last-good:v1.1.1"}; !slices.Equal(got, want) {
+		t.Fatalf("backed up %v, want %v", got, want)
+	}
+	decisions, _ := s.Decisions(ctx, "up/app", 10)
+	for _, d := range decisions {
+		if d.Ref == "v2.0.0" && !slices.Equal(d.Pending, []string{"notify"}) {
+			t.Fatalf("archive should be done: %+v", d)
+		}
 	}
 }
