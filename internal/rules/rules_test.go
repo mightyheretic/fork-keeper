@@ -34,7 +34,7 @@ func engine(t *testing.T, rules string) *Engine {
 
 // diff builds a changed Diff from old and new top-level license sets.
 func diff(old, cur []string) *license.Diff {
-	d := &license.Diff{OldRef: "v1", NewRef: "v2", Changed: true, OldLicenses: old, NewLicenses: cur,
+	d := &license.Diff{OldRef: "v1", NewRef: "v2", Changed: true, TopLevelChanged: true, OldLicenses: old, NewLicenses: cur,
 		OldDeclared: strings.Join(old, " AND "), NewDeclared: strings.Join(cur, " AND ")}
 	for _, id := range cur {
 		if !slices.Contains(old, id) {
@@ -174,29 +174,74 @@ func TestSpecialPatterns(t *testing.T) {
 	}
 }
 
-func TestLevelAnyIncludesHeadersAndNestedFiles(t *testing.T) {
-	e := engine(t, `
-    - name: top-only
+// subDiff is a version whose top-level license stays MIT while nested
+// license files and headers change.
+func subDiff(subAdded, headersAdded []string, files ...license.FileChange) *license.Diff {
+	d := &license.Diff{OldRef: "v1", NewRef: "v2", Changed: true, OldLicenses: []string{"MIT"},
+		NewLicenses: []string{"MIT"}, OldDeclared: "MIT", NewDeclared: "MIT", Files: files, SubAdded: subAdded}
+	d.Headers.Added = headersAdded
+	return d
+}
+
+func TestSubLicenseModes(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+credentials: {provider: env}
+repos:
+  - upstream: up/escalate
+  - upstream: up/ignore
+    sub_licenses: ignore
+  - upstream: up/all
+    sub_licenses: all
+license:
+  allowlist: [MIT, Apache-2.0]
+  rules:
+    - name: busl
       to: [BUSL-1.1]
       actions: [freeze]
-    - name: deep
-      to: [BUSL-1.1]
-      level: any
-      actions: [require_approval]
-`)
-	// Top-level stays MIT; BUSL appears only in file headers.
-	d := &license.Diff{Changed: true, OldLicenses: []string{"MIT"}, NewLicenses: []string{"MIT"},
-		OldDeclared: "MIT", NewDeclared: "MIT"}
-	d.Headers.Added = []string{"BUSL-1.1"}
-	if got := e.Evaluate("other/lib", d); got.Rule != "deep" {
-		t.Fatalf("headers: %+v", got)
+`))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Or in a new nested license file (ee/LICENSE).
-	d = &license.Diff{Changed: true, OldLicenses: []string{"MIT"}, NewLicenses: []string{"MIT"},
-		OldDeclared: "MIT", NewDeclared: "MIT",
-		Files: []license.FileChange{{Path: "ee/LICENSE", Change: "added", New: "BUSL-1.1"}}}
-	if got := e.Evaluate("other/lib", d); got.Rule != "deep" {
-		t.Fatalf("nested file: %+v", got)
+	e := New(cfg)
+	vendored := subDiff([]string{"Apache-2.0"}, nil,
+		license.FileChange{Path: "licenses/protobuf-LICENSE.txt", Change: "added", New: "Apache-2.0"})
+	busl := subDiff([]string{"BUSL-1.1"}, []string{"BUSL-1.1"},
+		license.FileChange{Path: "ee/LICENSE", Change: "added", New: "BUSL-1.1"})
+	known := subDiff(nil, []string{"MIT"}) // a header naming a license the project already has
+
+	for _, tc := range []struct {
+		repo   string
+		d      *license.Diff
+		rule   string
+		policy MergePolicy
+	}{
+		// escalate (default): allowed or already-present licenses are noise...
+		{"up/escalate", vendored, "", MergeAuto},
+		{"up/escalate", known, "", MergeAuto},
+		// ...but a new license outside the allowlist needs approval, not the top-level rules.
+		{"up/escalate", busl, "sub-license-escalation", MergeApproval},
+		// ignore: never acts on sub-licenses.
+		{"up/ignore", busl, "", MergeAuto},
+		// all: any sub-license change counts, and rules see nested licenses.
+		{"up/all", busl, "busl", MergeFrozen},
+		{"up/all", vendored, "default", MergeApproval},
+		// An unconfigured repo gets the default mode.
+		{"someone/else", busl, "sub-license-escalation", MergeApproval},
+	} {
+		d := e.Evaluate(tc.repo, tc.d)
+		if d.Rule != tc.rule || d.MergePolicy != tc.policy {
+			t.Errorf("%s %v: rule=%q policy=%s, want %q %s (%s)", tc.repo, tc.d.SubAdded, d.Rule, d.MergePolicy, tc.rule, tc.policy, d.Reason)
+		}
+	}
+	d := e.Evaluate("up/escalate", busl)
+	if !d.Has(config.ActionFlagPR) || !d.Has(config.ActionNotify) || !strings.Contains(d.Reason, "BUSL-1.1") {
+		t.Fatalf("escalation = %+v", d)
+	}
+	// A top-level change still runs the rules in every mode.
+	for _, repo := range []string{"up/escalate", "up/ignore", "up/all"} {
+		if d := e.Evaluate(repo, diff([]string{"MIT"}, []string{"BUSL-1.1"})); d.Rule != "busl" {
+			t.Errorf("%s top-level relicense: rule = %q", repo, d.Rule)
+		}
 	}
 }
 
@@ -222,7 +267,7 @@ func TestConfigValidation(t *testing.T) {
 		"unknown group":       "    - {name: a, groups: [nope], to: [MIT], actions: [notify]}\n",
 		"duplicate name":      "    - {name: a, to: [MIT], actions: [notify]}\n    - {name: a, to: [ISC], actions: [notify]}\n",
 		"missing name":        "    - {to: [MIT], actions: [notify]}\n",
-		"bad level":           "    - {name: a, to: [MIT], actions: [notify], level: deep}\n",
+		"level is gone":       "    - {name: a, to: [MIT], actions: [notify], level: any}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := config.Parse([]byte(baseConfig + rules)); err == nil {

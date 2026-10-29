@@ -16,7 +16,12 @@ type License struct {
 	// DefaultActions apply when licenses changed but no rule matched.
 	// Default: [require_approval, notify].
 	DefaultActions []string `yaml:"default_actions"`
-	Rules          []Rule   `yaml:"rules"`
+	// EscalationActions apply when the top-level license is unchanged but
+	// a nested license file or file header brings in a license that is new
+	// to the project and not on the allowlist (sub_licenses: escalate).
+	// Default: [require_approval, flag_pr, notify].
+	EscalationActions []string `yaml:"escalation_actions"`
+	Rules             []Rule   `yaml:"rules"`
 }
 
 // Rule maps a license transition to actions.
@@ -37,9 +42,6 @@ type Rule struct {
 	// Priority breaks ties between equally specific rules (higher wins);
 	// after that, the earlier rule in the file wins.
 	Priority int `yaml:"priority"`
-	// Level is "top" (default: top-level license files and manifests) or
-	// "any" (also nested license files and file headers).
-	Level string `yaml:"level"`
 }
 
 // Rule actions.
@@ -67,23 +69,34 @@ const (
 	PatternUnknown    = "unknown"     // NONE or NOASSERTION
 )
 
-// Rule levels.
+// How a repo treats sub-licenses: nested license files (ee/LICENSE,
+// vendored third-party licenses) and file headers. In every mode, only a
+// change to the project's own top-level license runs the rules, except
+// SubLicensesAll.
 const (
-	LevelTop = "top"
-	LevelAny = "any"
+	// SubLicensesEscalate (default) ignores sub-license changes unless one
+	// brings in a license that appeared nowhere in the previous version
+	// and isn't on the allowlist, such as a BUSL ee/ directory. That runs
+	// license.escalation_actions.
+	SubLicensesEscalate = "escalate"
+	// SubLicensesIgnore records sub-license changes but never acts on them.
+	SubLicensesIgnore = "ignore"
+	// SubLicensesAll treats any sub-license change as a license change and
+	// lets rules match licenses added in nested files and headers.
+	SubLicensesAll = "all"
 )
 
 func (c *Config) licenseDefaults() {
 	if c.License.DefaultActions == nil {
 		c.License.DefaultActions = []string{ActionRequireApproval, ActionNotify}
 	}
+	if c.License.EscalationActions == nil {
+		c.License.EscalationActions = []string{ActionRequireApproval, ActionFlagPR, ActionNotify}
+	}
 	for i := range c.License.Rules {
 		r := &c.License.Rules[i]
 		if len(r.From) == 0 {
 			r.From = []string{PatternAny}
-		}
-		if r.Level == "" {
-			r.Level = LevelTop
 		}
 	}
 }
@@ -96,6 +109,7 @@ func (c *Config) validateLicense(add func(string, ...any)) {
 		}
 	}
 	validateActions("license.default_actions", l.DefaultActions, add)
+	validateActions("license.escalation_actions", l.EscalationActions, add)
 
 	upstreams := map[string]bool{}
 	groups := map[string]bool{}
@@ -137,9 +151,6 @@ func (c *Config) validateLicense(add func(string, ...any)) {
 			}
 		}
 		validateActions(p+".actions", r.Actions, add)
-		if r.Level != LevelTop && r.Level != LevelAny {
-			add("%s.level: unknown level %q (want top or any)", p, r.Level)
-		}
 	}
 }
 

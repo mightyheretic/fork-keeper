@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mightyheretic/fork-keeper/internal/credentials"
 )
 
 // EventKind is the normalized type of a webhook event.
@@ -226,4 +228,69 @@ func compareChunk(a, b string) int {
 func isPrereleaseSuffix(s string) bool {
 	s = strings.TrimLeft(s, "-._+")
 	return s != "" && s[0] >= 'a' && s[0] <= 'z'
+}
+
+// GitRemote gives git access to repos over HTTPS.
+type GitRemote interface {
+	// CloneURL returns the HTTPS URL used to fetch from and push to repo.
+	CloneURL(repo Repo) string
+	// GitAuth returns the HTTP Authorization header value for git
+	// operations on repo, or an empty Secret for anonymous access.
+	GitAuth(ctx context.Context, repo Repo) (credentials.Secret, error)
+}
+
+// PullRequest is an open or closed pull (merge) request.
+type PullRequest struct {
+	Number  int
+	URL     string
+	State   string // "open" or "closed"
+	Merged  bool
+	Draft   bool
+	HeadSHA string
+	Labels  []string
+}
+
+// PullRequestInput is the content of a new or updated pull request.
+type PullRequestInput struct {
+	Title string
+	Body  string
+	// Head and Base are branch names in the same repo. Ignored on update.
+	Head  string
+	Base  string
+	Draft bool
+}
+
+// CIState summarizes the checks on a commit.
+type CIState string
+
+const (
+	// CINone means no checks or statuses were reported.
+	CINone    CIState = "none"
+	CIPending CIState = "pending"
+	CISuccess CIState = "success"
+	CIFailure CIState = "failure"
+)
+
+// CIStatus is the combined result of every check on a commit.
+type CIStatus struct {
+	State CIState
+	// Failed names the checks that failed, for messages.
+	Failed []string
+	Total  int
+}
+
+// ForkHost is what the merge engine needs from the provider hosting a fork.
+type ForkHost interface {
+	GitRemote
+	DefaultBranch(ctx context.Context, repo Repo) (string, error)
+	// FindPullRequest returns the open PR from head into base, or nil.
+	FindPullRequest(ctx context.Context, repo Repo, head, base string) (*PullRequest, error)
+	CreatePullRequest(ctx context.Context, repo Repo, in PullRequestInput) (*PullRequest, error)
+	// UpdatePullRequest changes the title and body of an open PR.
+	UpdatePullRequest(ctx context.Context, repo Repo, number int, in PullRequestInput) (*PullRequest, error)
+	GetPullRequest(ctx context.Context, repo Repo, number int) (*PullRequest, error)
+	AddLabels(ctx context.Context, repo Repo, number int, labels []string) error
+	CIStatus(ctx context.Context, repo Repo, sha string) (CIStatus, error)
+	// MergePullRequest merges with a merge commit, only if head is still sha.
+	MergePullRequest(ctx context.Context, repo Repo, number int, sha, title string) error
 }

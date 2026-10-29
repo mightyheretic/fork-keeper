@@ -195,3 +195,52 @@ repos:
 		})
 	}
 }
+
+func TestMergeConfig(t *testing.T) {
+	cfg, err := Parse([]byte(`
+credentials: {provider: env}
+repos:
+  - upstream: up/a
+    fork: me/a
+  - upstream: up/b
+    fork: me/b
+    merge_strategy: rebase
+    stable_branch: release
+    staging_branch: sync/upstream
+merge:
+  auto_merge: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := cfg.Repos[0], cfg.Repos[1]
+	if a.MergeStrategy != StrategyMerge || a.StagingBranch != DefaultStagingBranch || a.StableBranch != "" {
+		t.Fatalf("defaults = %+v", a)
+	}
+	if b.MergeStrategy != StrategyPatchStack || b.StagingBranch != "sync/upstream" {
+		t.Fatalf("rebase alias = %+v", b)
+	}
+	if cfg.Merge.AutoMergeEnabled() || !cfg.Merge.CIRequired() || cfg.Merge.CheckInterval != 5*time.Minute {
+		t.Fatalf("merge = %+v", cfg.Merge)
+	}
+	if !cfg.IsFork("ME/b") || cfg.IsFork("up/a") {
+		t.Fatal("IsFork")
+	}
+
+	for name, repo := range map[string]string{
+		"strategy":     "merge_strategy: octopus",
+		"branch":       "staging_branch: 'bad..name'",
+		"same":         "stable_branch: main\n    staging_branch: main",
+		"lock suffix":  "staging_branch: x.lock",
+		"leading dash": "staging_branch: -x",
+	} {
+		_, err := Parse([]byte("credentials: {provider: env}\nrepos:\n  - upstream: up/a\n    fork: me/a\n    " + repo + "\n"))
+		if err == nil {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+	dup := "credentials: {provider: env}\nrepos:\n  - {upstream: up/a, fork: me/x}\n  - {upstream: up/b, fork: me/x}\n"
+	if _, err := Parse([]byte(dup)); err == nil || !strings.Contains(err.Error(), "listed twice") {
+		t.Fatalf("duplicate fork: %v", err)
+	}
+}

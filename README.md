@@ -8,14 +8,15 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1–5 done.
+**Status:** V1 milestones 1–6 done.
 - **Watching:** the service polls upstream repos for new releases (or tags) and receives verified GitHub webhooks. Each new release is queued once in SQLite.
 - **License checks:** for each new release, it compares the licenses against the previous stable version.
 - **Rules:** your license rules decide what happens. A repo can be frozen at its last good version, and each version gets a merge policy for the merge engine.
+- **Merging:** each new release is merged into your fork on a staging branch, keeping history, and a PR is opened. `auto` PRs are merged once CI passes; anything else waits for you.
 - **GitHub access:** it authenticates as a GitHub App or with a fine-grained PAT, using pluggable credential backends.
 
-Merging, archiving and notifications land in later milestones. Until then those actions are
-recorded as pending.
+Archiving and notifications land in later milestones. Until then those actions are recorded
+as pending.
 
 ## Upstream polling
 
@@ -101,7 +102,13 @@ license:
 ```
 
 - **Patterns:** SPDX IDs (aliases like `BSL-1.1` are accepted), globs, `any`, `not-allowed` (outside the allowlist) and `unknown` (no license, or one that couldn't be identified).
-- **Level:** `level: any` also looks at nested license files and file headers, not just the top level.
+- **What counts as a license change:** rules run when the project's own license changes. That covers the declared expression, root license files and manifests. Nested license files (such as `ee/LICENSE` or vendored third-party licenses) and file headers are sub-licenses, and each repo's `sub_licenses` setting decides how they count:
+
+  | `sub_licenses` | Effect |
+  |---|---|
+  | `escalate` (default) | Ignored, unless a sub-license brings in a license that's new to the project and not on the allowlist (a BUSL `ee/` folder, say). That runs `escalation_actions`, by default require approval, flag the PR and notify |
+  | `ignore` | Recorded, never acted on |
+  | `all` | Any sub-license change counts, and rules also match licenses added in nested files and headers |
 - **Which rule wins:** the most specific rule (repo > group > global), then the highest `priority`, then the earliest in the file.
 - **New repos:** a repo's first version is checked against the allowlist.
 
@@ -109,8 +116,9 @@ license:
 |---|---|
 | `freeze` | The fork stays at the last version that passed. Takes effect immediately |
 | `block_auto_merge` | The PR is opened but never merged automatically |
-| `require_approval` | The PR merges only after you approve it |
-| `flag_pr`, `notify`, `archive`, `maintenance_branch` | Carried out by later milestones; recorded as pending until then |
+| `require_approval` | The PR is opened as a draft and merges only after you approve it |
+| `flag_pr` | The PR gets the `forkkeeper: license flagged` label |
+| `notify`, `archive`, `maintenance_branch` | Carried out by later milestones; recorded as pending until then |
 | `allow` | Accept the change; auto-merge stays on |
 
 Try your rules on real versions, check state, and lift a freeze:
@@ -120,6 +128,68 @@ forkkeeper rules test hashicorp/terraform v1.5.5 v1.6.0   # dry run, records not
 forkkeeper status [owner/repo]                            # frozen repos and recent decisions
 forkkeeper unfreeze --reason "upstream reverted" owner/repo
 ```
+
+## Merging into your fork
+
+Set `fork:` on a repo to have each new upstream release merged into it. Repos without a fork
+are only watched and license-checked.
+
+To create the fork itself, run `forkkeeper fork owner/repo`. It forks into the account of the
+auth profile's token (or `--org`), waits until GitHub has copied the repo, and prints the config
+to add. Forking with a fine-grained PAT needs **Administration: read & write** and repository
+access set to "All repositories". Syncing doesn't need it, so you can remove it afterwards, or
+just click "Fork" on GitHub instead.
+
+```yaml
+repos:
+  - upstream: junegunn/fzf
+    fork: your-user/fzf
+    # stable_branch: main                 # default: the fork's default branch
+    # staging_branch: forkkeeper/staging  # default; Fork Keeper owns and force-pushes it
+    # merge_strategy: merge               # merge | patch-stack | merge-only
+merge:
+  auto_merge: true     # merge "auto" PRs once CI passes
+  require_ci: true     # ...and only once at least one check has reported
+```
+
+For each release that isn't frozen:
+
+1. **Fetch:** your fork's stable branch and the upstream tag are fetched into a bare cache under
+   `<data_dir>/git`.
+2. **Merge:** upstream is merged into stable with full history.
+   - **On conflicts:** with the default `merge` strategy, your local patches are re-applied on top
+     of upstream one at a time (a patch stack). Patches upstream already has are left out.
+   - **The result:** it's still recorded as a merge of stable and upstream, so the PR merges
+     cleanly and history is kept. The re-applied patches are pushed to `<staging>-patches` for review.
+3. **Push:** the result goes to the staging branch. The stable branch is never pushed.
+4. **Open a PR:** one PR from staging into stable is opened, or updated when a newer release
+   replaces the previous one. Its body has the license check result, the merge policy and your
+   local patches.
+   - **Policy:** `approval_required` and `blocked` PRs are drafts, labeled `forkkeeper: needs
+     approval` or `forkkeeper: blocked`. Labels are never removed, so a newer release can't clear
+     an older concern.
+5. **Check:** every `merge.check_interval` (5m), open PRs are checked. A PR merged or closed on
+   GitHub is recorded. An `auto` PR is merged once its checks pass, unless it's a draft, labeled,
+   or someone else pushed to staging.
+
+If the merge and the patch stack both conflict, nothing is pushed. The conflicting files are
+recorded (see `forkkeeper status`), and you merge that release by hand. Releases older than one
+already synced (backports) are skipped.
+
+```sh
+forkkeeper sync --dry-run junegunn/fzf v0.74.5   # merge locally; push nothing, open no PR
+forkkeeper sync junegunn/fzf v0.74.5             # what the service does for a new release
+```
+
+`sync` exits 3 when the release conflicts.
+
+**Safety:**
+- **Nothing from upstream runs:** merges use `git merge-tree` in a bare repository, so upstream
+  files are never checked out.
+- **Safe git config:** every git command ignores system and user config, disables hooks,
+  fsmonitor and submodule recursion, and allows only HTTPS remotes.
+- **Tokens stay hidden:** they're passed through the environment for that one command, never in
+  arguments or saved remote URLs.
 
 ## Credentials
 
@@ -150,9 +220,22 @@ docker compose run --rm forkkeeper check
 
 ## GitHub App setup
 
-Create a GitHub App with these repository permissions: **Contents** read & write, **Pull requests**
-read & write, and **Metadata** read. Install it on your forks, then save its private key as
-`secrets/github_app_private_key.pem` and put its App ID in `.env`.
+Create a GitHub App with these repository permissions:
+
+| Permission | Access | Why |
+|---|---|---|
+| Contents | Read & write | Fetch and push the staging branch, merge PRs |
+| Pull requests | Read & write | Open, update, label and merge sync PRs |
+| Workflows | Read & write | Push upstream changes to `.github/workflows` (GitHub rejects them otherwise) |
+| Checks, Commit statuses | Read | Wait for CI before auto-merging |
+| Metadata | Read | Required by GitHub |
+
+Install it on your forks, then save its private key as `secrets/github_app_private_key.pem` and
+put its App ID in `.env`.
+
+A fine-grained PAT for forks needs the same permissions, limited to those repos. A read-only PAT
+can still poll upstreams, but pushes will fail. Map forks to the right profile with
+`github.repo_auth`, then run `forkkeeper check`. It confirms each fork is reachable.
 
 ## GitHub webhook setup
 
@@ -171,7 +254,7 @@ config/                example config; your real config.yaml is gitignored
 deploy/caddy/          reverse proxy: TLS, exposes only /webhooks/*
 docs/                  specification
 secrets/               mounted as /run/secrets; contents gitignored
-Dockerfile             multi-stage Go build -> distroless nonroot image
+Dockerfile             multi-stage Go build -> Alpine + git, nonroot
 compose.yaml           production stack (forkkeeper + caddy)
 compose.dev.yaml       local dev override (no proxy, debug logs)
 ```
@@ -195,7 +278,7 @@ docker compose up -d --build
 
 ### Hardening in place
 
-- Distroless image with no shell, running as non-root uid 65532
+- Minimal Alpine image (the merge engine needs `git`), running as non-root uid 65532
 - Read-only root filesystem, all capabilities dropped, `no-new-privileges`
 - Secrets mounted at runtime through compose `secrets:` and never baked into the image
 - The Docker socket is never mounted. Upstream CI must run in a separate sandbox (spec §6.3)

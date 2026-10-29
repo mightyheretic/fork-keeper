@@ -9,13 +9,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
+	"github.com/mightyheretic/fork-keeper/internal/git"
+	"github.com/mightyheretic/fork-keeper/internal/merge"
 	"github.com/mightyheretic/fork-keeper/internal/pipeline"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
@@ -55,12 +59,16 @@ func main() {
 		os.Exit(statusCmd(os.Args[2:]))
 	case "unfreeze":
 		os.Exit(unfreezeCmd(os.Args[2:]))
+	case "sync":
+		os.Exit(syncCmd(os.Args[2:]))
+	case "fork":
+		os.Exit(forkCmd(os.Args[2:]))
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
 		fmt.Println(version)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, healthcheck or version)\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q (want serve, check, poll, license, rules, status, unfreeze, sync, fork, healthcheck or version)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -214,6 +222,40 @@ func upstreamToken(cfg *config.Config, auth *github.Auth) github.TokenFunc {
 	}
 }
 
+// repoToken returns tokens for any repo: forks use their own auth profile
+// (github.repo_auth), everything else the upstream one.
+func repoToken(cfg *config.Config, auth *github.Auth) github.TokenFunc {
+	upstream := upstreamToken(cfg, auth)
+	return func(ctx context.Context, repo provider.Repo) (credentials.Secret, error) {
+		if cfg.IsFork(repo.FullName()) {
+			return auth.Token(ctx, repo)
+		}
+		return upstream(ctx, repo)
+	}
+}
+
+// newMergeEngine returns the merge engine and the fork hosts it uses. Git
+// data lives under <data_dir>/git.
+func newMergeEngine(cfg *config.Config, auth *github.Auth, st merge.Store, log *slog.Logger) (*merge.Engine, map[string]provider.ForkHost, error) {
+	hosts := map[string]provider.ForkHost{github.Name: github.NewForks(cfg.GitHub.APIURL, repoToken(cfg, auth), nil)}
+	dir := filepath.Join(cfg.DataDir, "git")
+	home := filepath.Join(dir, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return nil, nil, fmt.Errorf("create git dir: %w", err)
+	}
+	runner := &git.Runner{Home: home, Identity: git.Identity{Name: cfg.Merge.CommitterName, Email: cfg.Merge.CommitterEmail}}
+	return merge.New(hosts, st, runner, dir, log), hosts, nil
+}
+
+func hasForks(cfg *config.Config) bool {
+	for _, r := range cfg.Repos {
+		if r.Fork != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func newPoller(cfg *config.Config, auth *github.Auth, st watcher.Store, log *slog.Logger) *watcher.Poller {
 	listers := map[string]provider.RefLister{github.Name: github.NewRefs(cfg.GitHub.APIURL, upstreamToken(cfg, auth), nil)}
 	p := watcher.New(st, listers, pollTargets(cfg), log)
@@ -244,6 +286,41 @@ func warnAnonymousQuota(cfg *config.Config, log *slog.Logger) {
 	}
 }
 
+// checkForks confirms git is installed and every fork is reachable with
+// its auth profile.
+func checkForks(ctx context.Context, log *slog.Logger, cfg *config.Config, auth *github.Auth) bool {
+	if !hasForks(cfg) {
+		return true
+	}
+	ok := true
+	if _, err := exec.LookPath("git"); err != nil {
+		log.Error("git is not installed; forks can't be synced", "err", err)
+		ok = false
+	}
+	host := github.NewForks(cfg.GitHub.APIURL, repoToken(cfg, auth), nil)
+	for _, r := range cfg.Repos {
+		if r.Fork == "" {
+			continue
+		}
+		fork, _ := provider.ParseRepo(r.Fork)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		branch, err := host.DefaultBranch(ctx, fork)
+		cancel()
+		if err != nil {
+			log.Error("fork not reachable", "fork", r.Fork, "profile", cfg.GitHub.AuthProfileFor(r.Fork), "err", err)
+			ok = false
+			continue
+		}
+		stable := r.StableBranch
+		if stable == "" {
+			stable = branch
+		}
+		log.Info("fork reachable", "fork", r.Fork, "upstream", r.Upstream, "stable_branch", stable,
+			"staging_branch", r.StagingBranch, "strategy", r.MergeStrategy)
+	}
+	return ok
+}
+
 // check validates the config and credentials, then exits. Use it after
 // setup: `docker compose run --rm forkkeeper check`.
 func check() int {
@@ -256,7 +333,9 @@ func check() int {
 	ctx := context.Background()
 	creds := newCredentials(cfg.Credentials)
 	ok := auditCredentials(ctx, log, creds, cfg.CredentialNames())
-	ok = validateAuth(ctx, log, newGitHubAuth(cfg, creds)) && ok
+	auth := newGitHubAuth(cfg, creds)
+	ok = validateAuth(ctx, log, auth) && ok
+	ok = checkForks(ctx, log, cfg, auth) && ok
 	if !ok {
 		return 1
 	}
@@ -293,10 +372,22 @@ func serve() error {
 		log.Warn("requeued deliveries interrupted by previous shutdown", "count", n)
 	}
 
+	engine, hosts, err := newMergeEngine(cfg, auth, db, log.With("component", "merge"))
+	if err != nil {
+		return err
+	}
+	var syncer pipeline.Syncer
+	if hasForks(cfg) {
+		if _, err := exec.LookPath("git"); err != nil {
+			log.Error("git is not installed; forks won't be synced", "err", err)
+		} else {
+			syncer = engine
+		}
+	}
 	licenseGate := gate.New(db, map[string]provider.ArchiveFetcher{
 		github.Name: github.NewArchives(cfg.GitHub.APIURL, upstreamToken(cfg, auth)),
 	}, log.With("component", "gate"))
-	pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, log.With("component", "pipeline"))
+	pipe := pipeline.New(cfg, licenseGate, rules.New(cfg), db, syncer, log.With("component", "pipeline"))
 	w := worker.New(db, pipe.Process, log.With("component", "worker"))
 
 	webhookSecret := func() ([]byte, error) {
@@ -346,6 +437,18 @@ func serve() error {
 		poller.Run(ctx)
 	}()
 
+	reconcilerDone := make(chan struct{})
+	go func() {
+		defer close(reconcilerDone)
+		if syncer == nil {
+			return
+		}
+		r := merge.NewReconciler(hosts, db, log.With("component", "reconciler"))
+		r.Interval = cfg.Merge.CheckInterval
+		r.AutoMerge, r.RequireCI = cfg.Merge.AutoMergeEnabled(), cfg.Merge.CIRequired()
+		r.Run(ctx)
+	}()
+
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
 		go func() {
@@ -370,6 +473,7 @@ func serve() error {
 	}
 	<-workerDone
 	<-pollerDone
+	<-reconcilerDone
 	return runErr
 }
 
@@ -409,7 +513,7 @@ func newServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
-// healthcheck is used by the container HEALTHCHECK; distroless has no curl.
+// healthcheck is used by the container HEALTHCHECK, so the image needs no curl.
 func healthcheck() int {
 	_, port, err := net.SplitHostPort(getenv("FORKKEEPER_WEBHOOK_ADDR", ":8080"))
 	if err != nil {

@@ -49,11 +49,30 @@ watcher:
   # fine-grained PAT with read access to public repos is the simplest choice.
   # auth: personal
 
+# Merge engine: merges each new release into repos[].fork on a staging
+# branch and opens a PR into the stable branch.
+merge:
+  auto_merge: true        # merge PRs with an "auto" policy once CI passes
+  require_ci: true        # ...and only after at least one check has reported
+  check_interval: 5m      # how often open sync PRs are checked
+  committer_name: Fork Keeper
+  committer_email: forkkeeper@localhost
+
 notifications:
   ntfy:
     url: https://ntfy.sh/your-topic
 
 # What to do when an upstream's licenses change between versions.
+# Rules run when the project's own (top-level) license changes: the declared
+# expression, root license files and manifests. Nested license files and file
+# headers ("sub-licenses") are handled per repo by repos[].sub_licenses:
+#   escalate (default): act only if a sub-license brings in a license that is
+#            new to the project and not on the allowlist (e.g. a BUSL ee/
+#            directory); runs escalation_actions. Vendored MIT/Apache license
+#            files are ignored.
+#   ignore:  never act on sub-licenses.
+#   all:     any sub-license change counts, and rules also match licenses
+#            added in nested files and headers.
 #   from:    licenses in the previous version (default: any)
 #   to:      licenses added in the new version
 #   removed: licenses dropped in the new version (a rule needs to and/or removed)
@@ -66,6 +85,7 @@ notifications:
 license:
   allowlist: [MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0]
   default_actions: [require_approval, notify]   # licenses changed, no rule matched
+  escalation_actions: [require_approval, flag_pr, notify]   # sub_licenses: escalate
   rules:
     - name: relicense-to-source-available
       from: [MIT, Apache-2.0, BSD-*, MPL-2.0]
@@ -80,7 +100,6 @@ license:
       actions: [block_auto_merge, notify]
     - name: outside-allowlist
       to: [not-allowed]
-      level: any          # also nested license files and file headers
       actions: [require_approval, flag_pr, notify]
     # Per-repo override example:
     # - name: some-app-is-fine
@@ -90,13 +109,17 @@ license:
 
 repos:
   - upstream: upstream-org/some-app
-    fork: your-user/some-app        # optional until the merge engine lands
+    fork: your-user/some-app        # optional; without it the upstream is only watched
     watch: releases                 # releases | tags (for projects that only tag)
     groups: [apps]                  # optional, for group-scoped license rules
+    # sub_licenses: escalate        # escalate | ignore | all (see license: above)
     # include_prereleases: true     # overrides watcher.include_prereleases
-    stable_branch: main
+    stable_branch: main             # default: the fork's default branch
     staging_branch: forkkeeper/staging
-    merge_strategy: merge   # merge | rebase | patch-stack
+    # merge: full-history merge, re-applying local patches if it conflicts (default)
+    # patch-stack: always re-apply local patches on top of upstream (alias: rebase)
+    # merge-only: merge, and report conflicts without trying the patch stack
+    merge_strategy: merge
     archive:
       mirrors: []
       software_heritage: true

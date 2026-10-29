@@ -52,6 +52,7 @@ Keep a stable, maintained fork of each open-source app you depend on. When upstr
 - Fallback when conflicts are heavy: rebase, or a cherry-picked patch stack.
 - Local patches are kept as a separate, labeled layer so they can be re-applied or reviewed independently.
 - All merges happen on a staging branch. CI runs there. The result is opened as a PR, never pushed directly to the stable branch.
+- V1 implementation: merges run with `git merge-tree` in a bare cache, so upstream files are never checked out on the host. The patch-stack fallback re-applies the fork's own commits (those not in upstream, minus patch-equivalent ones) onto the tag. The result is recorded as a merge commit of stable and upstream, so the PR still merges cleanly and keeps history. The layer is pushed to `<staging>-patches`. One PR per fork is reused across releases. `auto` PRs are merged by Fork Keeper once CI passes; approval and blocked policies open drafts with sticky labels.
 
 ### 4.3 License Transition Rules (merged tripwire and policy)
 
@@ -81,13 +82,15 @@ The license gate compares the SPDX identifier, the LICENSE file and per-file hea
 **Edge cases to decide**
 
 - Compound licenses (`MIT OR GPL`, `AND`): rules must handle licenses being added or removed, not only swapped.
-- Per-file license changes versus the top-level LICENSE.
+- ~~Per-file license changes versus the top-level LICENSE.~~ Decided: only the top-level license (declared expression, root license files, manifests) triggers rules. Sub-licenses (nested license files, file headers) are set per repo: `escalate` (default) acts only when a sub-license brings in a license new to the project and outside the allowlist, a common precursor to relicensing (open-core `ee/` folders); `ignore`; or `all`.
 - Freeze semantics: stop syncing entirely, or keep cherry-picking pre-change security fixes?
 - Freeze reversal: whether it is allowed and how it is done (approval plus audit entry).
 
 ### 4.4 Archival Backup
 
 - Mirror each fork to a second provider and/or Software Heritage, so a deleted or tampered upstream cannot take your copy with it.
+- Back up the source of each release (every major, optionally minors): git history and tags only, never release assets or binaries. Releases, not commits on the default branch, are the sync and backup points.
+- Main-branch early warning: relicensing usually lands on the default branch weeks or months before a release ships it (Terraform, Redis, Elasticsearch). Watch-only, never merged: when the upstream's default-branch head moves, check only its top-level license. On a change, notify ("relicense on main, not yet released"), tag the last commit before the change in the fork and the source backup (`forkkeeper/last-open`), and apply license rules early, so a freeze takes effect before the release arrives. Sub-licenses on main are ignored.
 - Triggered on schedule and by the "snapshot to archive" rule action.
 
 ### 4.5 Approvals and Notifications
@@ -200,10 +203,10 @@ Fork Keeper combines fork syncing, license-aware policy and archival in one self
 
 1. Freeze semantics: full stop, or continued security cherry-picks? (V1: full stop at the last good version; unfreeze via CLI with a recorded reason.)
 2. ~~Compound-license handling in rules~~ Decided: `from` matches the old version's licenses, `to` matches licenses added, `removed` matches licenses dropped; AND/OR restructuring without an added or removed license falls to the default rule.
-3. Per-file license change detection: how deep, and how to avoid noise.
+3. ~~Per-file license change detection: how deep, and how to avoid noise.~~ Decided: top-level only, with per-repo `sub_licenses` (see 4.3).
 4. V2 UI exposure: public with strong auth, or VPN-only?
 5. State store: SQLite or Postgres?
-6. Where CI sandbox runs (container vs systemd-nspawn) and how results are reported back.
+6. Where CI sandbox runs (container vs systemd-nspawn) and how results are reported back. (V1: CI is the fork's own CI, e.g. GitHub Actions on the staging PR. Fork Keeper reads check runs and commit statuses and never runs upstream code itself.)
 7. Poll interval (default 15 minutes; anonymous access limits this to a handful of repos).
 
 ## 10. Suggested V1 Milestones
@@ -214,6 +217,6 @@ Fork Keeper combines fork syncing, license-aware policy and archival in one self
 4. License diff detection (SPDX, LICENSE file, headers)
 5. Rule engine with scopes, priorities and actions
 6. Merge engine on staging branch with PR creation
-7. Archival mirror and Software Heritage snapshot
+7. Archival: release source backups, mirror and Software Heritage snapshot, main-branch early warning
 8. CLI for approvals and rule management, audit log, notifications
 9. systemd unit and hardening, packaging

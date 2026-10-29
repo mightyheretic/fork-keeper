@@ -11,6 +11,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
 	"github.com/mightyheretic/fork-keeper/internal/license"
+	"github.com/mightyheretic/fork-keeper/internal/merge"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -37,11 +38,16 @@ func result(prev string, old, cur []string, ref string) gate.Result {
 }
 
 func setup(t *testing.T, g fakeGate) (*Pipeline, *store.Store) {
+	return setupWith(t, g, "", nil)
+}
+
+func setupWith(t *testing.T, g fakeGate, fork string, syncer Syncer) (*Pipeline, *store.Store) {
 	t.Helper()
 	cfg, err := config.Parse([]byte(`
 credentials: {provider: env}
 repos:
   - upstream: up/app
+    fork: "` + fork + `"
 license:
   allowlist: [MIT]
   rules:
@@ -58,7 +64,43 @@ license:
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(cfg, g, rules.New(cfg), s, slog.New(slog.DiscardHandler)), s
+	return New(cfg, g, rules.New(cfg), s, syncer, slog.New(slog.DiscardHandler)), s
+}
+
+type fakeSyncer struct{ reqs []merge.Request }
+
+func (f *fakeSyncer) Sync(_ context.Context, req merge.Request) (merge.Result, error) {
+	f.reqs = append(f.reqs, req)
+	return merge.Result{Sync: store.Sync{Status: store.SyncPROpen}}, nil
+}
+
+func TestSyncsForkUntilFrozen(t *testing.T) {
+	ctx := context.Background()
+	syncer := &fakeSyncer{}
+	p, _ := setupWith(t, fakeGate{
+		"v2": result("v1", []string{"MIT"}, []string{"MIT"}, "v2"),
+		"v3": result("v2", []string{"MIT"}, []string{"BUSL-1.1"}, "v3"),
+		"v4": result("v3", []string{"BUSL-1.1"}, []string{"BUSL-1.1"}, "v4"),
+	}, "me/app", syncer)
+
+	out, err := p.Run(ctx, event("v2"))
+	if err != nil || out.Sync == nil || len(syncer.reqs) != 1 {
+		t.Fatalf("v2: out=%+v err=%v", out, err)
+	}
+	req := syncer.reqs[0]
+	if req.Fork.FullName() != "me/app" || req.Ref != "v2" || req.PreviousRef != "v1" ||
+		req.Decision.MergePolicy != rules.MergeAuto || req.Repo.StagingBranch != config.DefaultStagingBranch {
+		t.Fatalf("request = %+v", req)
+	}
+	// The relicense freezes the repo; neither it nor later versions are synced.
+	for _, tag := range []string{"v3", "v4"} {
+		if out, err := p.Run(ctx, event(tag)); err != nil || out.Sync != nil {
+			t.Fatalf("%s: out=%+v err=%v", tag, out, err)
+		}
+	}
+	if len(syncer.reqs) != 1 {
+		t.Fatalf("synced %d times, want 1", len(syncer.reqs))
+	}
 }
 
 func event(tag string) provider.Event {

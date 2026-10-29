@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -45,6 +46,9 @@ var DefaultOptions = Options{
 
 // Report describes the licensing of one version of a source tree.
 type Report struct {
+	// ScanVersion is the scanner version that produced the report. Cached
+	// reports from an older version are rescanned.
+	ScanVersion int `json:"scan_version"`
 	// Declared is the top-level license expression: from root license
 	// files when present, else from root manifests. None if neither exists.
 	Declared string `json:"declared"`
@@ -87,6 +91,26 @@ type HeaderSummary struct {
 	Files map[string]string `json:"files"`
 }
 
+// AllLicenses returns every license ID found anywhere: top level, any
+// license file and any file header. Sorted.
+func (r *Report) AllLicenses() []string {
+	set := map[string]bool{}
+	for _, id := range r.Licenses {
+		set[id] = true
+	}
+	for _, f := range r.Files {
+		if e, err := Parse(f.Expression); err == nil {
+			for _, id := range e.Licenses() {
+				set[id] = true
+			}
+		}
+	}
+	for id := range r.Headers.ByLicense {
+		set[id] = true
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
 // Marshal encodes the report as JSON.
 func (r *Report) Marshal() ([]byte, error) { return json.Marshal(r) }
 
@@ -96,8 +120,18 @@ func UnmarshalReport(b []byte) (*Report, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, err
 	}
+	if r.ScanVersion != ScanVersion {
+		return nil, ErrStaleReport
+	}
 	return &r, nil
 }
+
+// ScanVersion changes whenever a scanner change can alter reports.
+// 3: a LICENSES/ directory is top-level only when no root license file identifies a license.
+const ScanVersion = 3
+
+// ErrStaleReport means a cached report came from an older scanner.
+var ErrStaleReport = errors.New("license report is from an older scanner version")
 
 // Scan walks a tree and builds its license report. It only reads files; it
 // never runs anything from the tree.
@@ -211,7 +245,23 @@ func (r *Report) addHeader(p string, body io.Reader, n int) error {
 
 // finish derives Declared and Licenses and sorts the findings.
 func (r *Report) finish() {
+	r.ScanVersion = ScanVersion
 	slices.SortFunc(r.Files, func(a, b FileFinding) int { return strings.Compare(a.Path, b.Path) })
+
+	// A top-level LICENSES/ directory is the project's license (REUSE)
+	// unless a license file at the root itself identifies one. Next to an
+	// identified root LICENSE it usually holds bundled third-party
+	// licenses: sub-licenses. A root file that only points elsewhere
+	// ("see licenses/") leaves LICENSES/ as the project's license.
+	if slices.ContainsFunc(r.Files, func(f FileFinding) bool {
+		return f.Root && !strings.Contains(f.Path, "/") && f.Expression != NoAssertion && f.Expression != None
+	}) {
+		for i := range r.Files {
+			if strings.Contains(r.Files[i].Path, "/") {
+				r.Files[i].Root = false
+			}
+		}
+	}
 	slices.SortFunc(r.Manifests, func(a, b ManifestFinding) int { return strings.Compare(a.Path, b.Path) })
 
 	var fromFiles, fromManifests []*Expr

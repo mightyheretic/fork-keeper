@@ -1,17 +1,20 @@
 // Package pipeline processes a queued upstream release: license gate, then
-// rule engine, then the actions that can be applied right away. Later
-// stages (merge, archive, notify) pick up the recorded pending actions.
+// rule engine, then the actions that can be applied right away, then the
+// merge engine. Later stages (archive, notify) pick up the recorded
+// pending actions.
 package pipeline
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 
 	"github.com/mightyheretic/fork-keeper/internal/config"
 	"github.com/mightyheretic/fork-keeper/internal/gate"
+	"github.com/mightyheretic/fork-keeper/internal/merge"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -30,18 +33,26 @@ type Checker interface {
 	Check(ctx context.Context, ev provider.Event) (gate.Result, error)
 }
 
+// Syncer runs the merge engine.
+type Syncer interface {
+	Sync(ctx context.Context, req merge.Request) (merge.Result, error)
+}
+
 // Pipeline handles one event at a time.
 type Pipeline struct {
 	cfg    *config.Config
 	gate   Checker
 	engine *rules.Engine
 	store  Store
+	syncer Syncer
 	log    *slog.Logger
+	// ForceSync re-syncs refs that were already synced (CLI use).
+	ForceSync bool
 }
 
-// New returns a pipeline.
-func New(cfg *config.Config, g Checker, engine *rules.Engine, st Store, log *slog.Logger) *Pipeline {
-	return &Pipeline{cfg: cfg, gate: g, engine: engine, store: st, log: log}
+// New returns a pipeline. syncer may be nil to only check licenses.
+func New(cfg *config.Config, g Checker, engine *rules.Engine, st Store, syncer Syncer, log *slog.Logger) *Pipeline {
+	return &Pipeline{cfg: cfg, gate: g, engine: engine, store: st, syncer: syncer, log: log}
 }
 
 // Outcome is what Process did, for logging and tests.
@@ -52,6 +63,8 @@ type Outcome struct {
 	// NewlyFrozen is true when this event froze the repo.
 	NewlyFrozen bool
 	State       store.RepoState
+	// Sync is set when the merge engine ran.
+	Sync *merge.Result
 }
 
 // Process is a worker.Processor.
@@ -68,7 +81,8 @@ func (p *Pipeline) Run(ctx context.Context, ev provider.Event) (Outcome, error) 
 		out.Skipped = "not a release or tag"
 		return out, nil
 	}
-	if _, ok := p.cfg.RepoFor(ev.Repo.FullName()); !ok {
+	repoCfg, ok := p.cfg.RepoFor(ev.Repo.FullName())
+	if !ok {
 		out.Skipped = "not a configured upstream"
 		log.Info("ignoring event for a repo that isn't a configured upstream")
 		return out, nil
@@ -144,5 +158,68 @@ func (p *Pipeline) Run(ctx context.Context, ev provider.Event) (Outcome, error) 
 	if len(d.Matched) > 1 {
 		log.Info("other rules also matched but had lower precedence", "rules", strings.Join(d.Matched[1:], ", "))
 	}
+
+	if repoCfg.Fork == "" || p.syncer == nil {
+		return out, nil
+	}
+	if out.State.Frozen {
+		log.Info("not syncing the fork: repo is frozen", "frozen_at", out.State.FrozenRef)
+		return out, nil
+	}
+	fork, err := provider.ParseRepo(repoCfg.Fork)
+	if err != nil {
+		return out, worker.Permanent(err)
+	}
+	req := SyncRequest(ev, fork, repoCfg, res, d)
+	req.Force = p.ForceSync
+	sync, err := p.syncer.Sync(ctx, req)
+	if errors.Is(err, provider.ErrRefNotFound) || errors.Is(err, merge.ErrNoCommonHistory) {
+		return out, worker.Permanent(err)
+	}
+	if err != nil {
+		return out, fmt.Errorf("sync %s: %w", repoCfg.Fork, err)
+	}
+	out.Sync = &sync
+	logSync(log, sync)
 	return out, nil
+}
+
+// SyncRequest builds the merge engine request for an event.
+func SyncRequest(ev provider.Event, fork provider.Repo, repoCfg config.Repo, res gate.Result, d rules.Decision) merge.Request {
+	summary := ""
+	switch {
+	case res.Diff != nil:
+		summary = res.Diff.Summary()
+	case res.Report != nil:
+		summary = fmt.Sprintf("First version checked: %s is %s.", ev.Tag, res.Report.Declared)
+	}
+	return merge.Request{
+		Provider:    ev.Provider,
+		Upstream:    ev.Repo,
+		Fork:        fork,
+		Ref:         ev.Tag,
+		PreviousRef: res.Previous,
+		ReleaseURL:  ev.URL,
+		Repo:        repoCfg,
+		Decision:    d,
+		License:     summary,
+	}
+}
+
+func logSync(log *slog.Logger, s merge.Result) {
+	attrs := []any{"fork", s.Fork, "status", s.Status, "strategy", s.Strategy, "local_patches", len(s.Patches)}
+	if s.PRURL != "" {
+		attrs = append(attrs, "pr", s.PRURL)
+	}
+	if s.Detail != "" {
+		attrs = append(attrs, "detail", s.Detail)
+	}
+	switch {
+	case s.Already:
+		log.Info("fork already synced to this version", attrs...)
+	case s.Status == store.SyncConflict:
+		log.Warn("fork sync conflicts; needs manual merge", append(attrs, "conflicts", s.Conflicts)...)
+	default:
+		log.Info("fork sync done", attrs...)
+	}
 }

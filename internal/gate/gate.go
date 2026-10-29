@@ -5,6 +5,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -88,10 +89,15 @@ func (g *Gate) Report(ctx context.Context, providerName string, repo provider.Re
 	if b, ok, err := g.store.LicenseReport(ctx, key); err != nil {
 		return nil, err
 	} else if ok {
-		if r, err := license.UnmarshalReport(b); err == nil {
+		r, err := license.UnmarshalReport(b)
+		switch {
+		case err == nil:
 			return r, nil
+		case errors.Is(err, license.ErrStaleReport):
+			g.log.Info("cached license report is from an older scanner; rescanning", "repo", key.Repo, "ref", ref)
+		default:
+			g.log.Warn("cached license report unreadable; rescanning", "repo", key.Repo, "ref", ref)
 		}
-		g.log.Warn("cached license report unreadable; rescanning", "repo", key.Repo, "ref", ref)
 	}
 
 	fetch, ok := g.archives[providerName]
