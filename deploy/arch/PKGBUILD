@@ -1,0 +1,55 @@
+# Maintainer: mightyheretic
+#
+# Builds Fork Keeper from git. By default it clones the GitHub repo's main
+# branch; to package a local checkout's committed state instead:
+#   FORKKEEPER_SRC=/path/to/fork-keeper FORKKEEPER_REF=my-branch makepkg -si
+
+pkgname=forkkeeper
+pkgver=0
+pkgrel=1
+pkgdesc='Keeps forks synced with upstream and locks down source before license changes'
+arch=('x86_64' 'aarch64')
+url='https://github.com/mightyheretic/fork-keeper'
+license=('GPL-3.0-only')
+depends=('git' 'systemd' 'ca-certificates')
+makedepends=('go')
+backup=('etc/forkkeeper/config.yaml' 'etc/forkkeeper/forkkeeper.env')
+options=('!debug') # stripped Go binary: nothing for a -debug package
+install=forkkeeper.install
+_src=${FORKKEEPER_SRC:-https://github.com/mightyheretic/fork-keeper.git}
+[[ $_src == /* ]] && _src=file://$_src
+source=("fork-keeper::git+$_src#branch=${FORKKEEPER_REF:-main}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd fork-keeper
+  # v1.2.3-4-gabcdef -> 1.2.3.r4.gabcdef; untagged -> r123.gabcdef
+  if git describe --tags >/dev/null 2>&1; then
+    git describe --long --tags | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+  else
+    printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+  fi
+}
+
+prepare() {
+  cd fork-keeper
+  export GOPATH="$srcdir/gopath"
+  go mod download
+}
+
+build() {
+  cd fork-keeper
+  export GOPATH="$srcdir/gopath" GOFLAGS='-modcacherw'
+  make build VERSION="$pkgver"
+}
+
+check() {
+  cd fork-keeper
+  export GOPATH="$srcdir/gopath" GOFLAGS='-modcacherw'
+  go test ./...
+}
+
+package() {
+  cd fork-keeper
+  make install DESTDIR="$pkgdir" PREFIX=/usr
+}

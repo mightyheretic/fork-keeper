@@ -1,0 +1,81 @@
+#!/bin/sh
+# forkkeeperctl: run forkkeeper commands the way forkkeeper.service runs:
+# as the forkkeeper user, with the service's environment and its encrypted
+# credentials, in a sandbox like the service's.
+#
+#   forkkeeperctl approvals
+#   forkkeeperctl approve 3
+#   forkkeeperctl set-credential github_pat     # prompts, or reads stdin
+#   forkkeeperctl credentials                   # stored credentials
+#
+# The audit log records the user who ran it (via sudo), not "forkkeeper".
+set -eu
+
+UNIT=forkkeeper.service
+STORE=/etc/credstore.encrypted
+PREFIX=forkkeeper.
+BIN=${FORKKEEPER_BIN:-/usr/bin/forkkeeper}
+
+usage() {
+	sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2
+	exit 2
+}
+
+[ $# -gt 0 ] || usage
+case $1 in -h | --help | help) usage ;; esac
+
+if [ "$(id -u)" != 0 ]; then
+	exec sudo -- "$0" "$@"
+fi
+
+case $1 in
+set-credential)
+	[ $# -eq 2 ] || { echo "usage: forkkeeperctl set-credential <name>" >&2; exit 2; }
+	name=$2
+	case $name in
+	*[!A-Za-z0-9_.-]* | '' | . | ..) echo "invalid credential name: $name" >&2; exit 2 ;;
+	esac
+	mkdir -p -m 0700 "$STORE"
+	out=$STORE/$PREFIX$name
+	# host+tpm2 when there is a TPM2, the host key otherwise.
+	if [ -t 0 ]; then
+		systemd-ask-password --emoji=no --echo=no "Value for $name:" |
+			systemd-creds encrypt --name="$PREFIX$name" - "$out"
+	else
+		systemd-creds encrypt --name="$PREFIX$name" - "$out"
+	fi
+	chmod 0600 "$out"
+	echo "Stored $out. Apply it with: systemctl restart $UNIT" >&2
+	exit 0
+	;;
+credentials)
+	for f in "$STORE/$PREFIX"*; do
+		[ -e "$f" ] && echo "${f#"$STORE/$PREFIX"}"
+	done
+	exit 0
+	;;
+esac
+
+actor=${SUDO_USER:-$(id -un)}
+set -- "$BIN" "$@"
+# The service's Environment= (unit and drop-ins), then its env file
+# (EnvironmentFile= below wins, as in the service).
+for kv in $(systemctl show -p Environment --value "$UNIT"); do
+	set -- --setenv="$kv" "$@"
+done
+set -- --setenv=FORKKEEPER_ACTOR="$actor" "$@"
+
+tty=--pipe
+[ -t 0 ] && [ -t 1 ] && tty=--pty
+
+exec systemd-run --quiet --wait --collect --service-type=exec "$tty" \
+	--unit="forkkeeperctl-$$" \
+	-p User=forkkeeper -p Group=forkkeeper \
+	-p StateDirectory=forkkeeper -p UMask=0077 \
+	-p EnvironmentFile=-/etc/forkkeeper/forkkeeper.env \
+	-p "ImportCredential=$PREFIX*" \
+	-p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes \
+	-p PrivateTmp=yes -p PrivateDevices=yes -p CapabilityBoundingSet= \
+	-p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
+	-p SystemCallFilter=@system-service -p SystemCallArchitectures=native \
+	"$@"

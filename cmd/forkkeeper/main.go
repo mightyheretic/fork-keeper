@@ -28,6 +28,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
+	"github.com/mightyheretic/fork-keeper/internal/sdnotify"
 	"github.com/mightyheretic/fork-keeper/internal/store"
 	"github.com/mightyheretic/fork-keeper/internal/swh"
 	"github.com/mightyheretic/fork-keeper/internal/watcher"
@@ -120,7 +121,7 @@ func newCredentials(c config.Credentials) credentials.Provider {
 	case "command":
 		return &credentials.Command{Argv: c.Command.Argv, Timeout: c.Command.Timeout}
 	default:
-		return credentials.File{Dir: c.File.Dir}
+		return credentials.File{Dir: c.File.Dir, Prefix: c.File.Prefix}
 	}
 }
 
@@ -518,6 +519,20 @@ func serve() error {
 		newServer(getenv("FORKKEEPER_WEBHOOK_ADDR", ":8080"), public),
 		newServer(getenv("FORKKEEPER_API_ADDR", ":8081"), api),
 	}
+	// Bind every port before starting any work, so a port that's in use
+	// fails the start cleanly, and systemd hears "ready" only once requests
+	// can be served.
+	var listeners []net.Listener
+	for _, s := range servers {
+		l, err := net.Listen("tcp", s.Addr)
+		if err != nil {
+			for _, l := range listeners {
+				l.Close()
+			}
+			return fmt.Errorf("listen on %s: %w", s.Addr, err)
+		}
+		listeners = append(listeners, l)
+	}
 
 	workerDone := make(chan struct{})
 	go func() {
@@ -569,14 +584,28 @@ func serve() error {
 	}()
 
 	errc := make(chan error, len(servers))
-	for _, s := range servers {
+	for i, s := range servers {
 		go func() {
 			log.Info("listening", "addr", s.Addr, "version", version)
-			if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := s.Serve(listeners[i]); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errc <- err
 			}
 		}()
 	}
+	if ok, err := sdnotify.Notify(sdnotify.Ready); err != nil {
+		log.Warn("could not notify systemd", "err", err)
+	} else if ok {
+		log.Debug("notified systemd: ready")
+	}
+	go sdnotify.RunWatchdog(ctx, func() bool {
+		pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := db.Ping(pingCtx); err != nil {
+			log.Error("database unavailable; skipping watchdog keep-alive", "err", err)
+			return false
+		}
+		return true
+	})
 
 	var runErr error
 	select {
@@ -584,6 +613,7 @@ func serve() error {
 		stop()
 	case <-ctx.Done():
 	}
+	_, _ = sdnotify.Notify(sdnotify.Stopping)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

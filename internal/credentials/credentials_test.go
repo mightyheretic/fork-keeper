@@ -87,6 +87,14 @@ func TestFile(t *testing.T) {
 	if w, err := p.Check("loose"); err != nil || len(w) != 1 {
 		t.Fatalf("Check(0644) = %v, %v; want one warning", w, err)
 	}
+
+	os.WriteFile(filepath.Join(dir, "forkkeeper.tok"), []byte("prefixed"), 0o600)
+	if s, err := (File{Dir: dir, Prefix: "forkkeeper."}).Get(ctx, "tok"); err != nil || s.Reveal() != "prefixed" {
+		t.Fatalf("prefixed Get = %q, %v", s.Reveal(), err)
+	}
+	if _, err := (File{Dir: dir, Prefix: "../"}).Get(ctx, "tok"); err == nil {
+		t.Fatal("prefix path traversal accepted")
+	}
 }
 
 func TestEnv(t *testing.T) {

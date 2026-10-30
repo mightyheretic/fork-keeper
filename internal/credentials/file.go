@@ -15,6 +15,10 @@ import (
 // Files are re-read on every Get, so a replaced file takes effect immediately.
 type File struct {
 	Dir string
+	// Prefix is prepended to each name to get the file name. The systemd
+	// unit imports forkkeeper.* from the encrypted credential store, so
+	// github_pat is read from $CREDENTIALS_DIRECTORY/forkkeeper.github_pat.
+	Prefix string
 }
 
 var _ interface {
@@ -31,7 +35,10 @@ func (p File) path(name string) (string, error) {
 	if err := ValidateName(name); err != nil {
 		return "", err
 	}
-	return filepath.Join(p.Dir, name), nil
+	if err := ValidateName(p.Prefix + name); err != nil {
+		return "", fmt.Errorf("file credential provider: bad prefix %q: %w", p.Prefix, err)
+	}
+	return filepath.Join(p.Dir, p.Prefix+name), nil
 }
 
 func (p File) Get(_ context.Context, name string) (Secret, error) {
@@ -41,7 +48,7 @@ func (p File) Get(_ context.Context, name string) (Secret, error) {
 	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Secret{}, fmt.Errorf("credential %q: %w (looked in %s)", name, ErrNotFound, p.Dir)
+		return Secret{}, fmt.Errorf("credential %q: %w (looked for %s)", name, ErrNotFound, path)
 	}
 	if err != nil {
 		return Secret{}, fmt.Errorf("credential %q: %w", name, err)

@@ -23,3 +23,9 @@ coverage.*
 .vscode/
 *.swp
 .DS_Store
+
+# Build and packaging output
+/deploy/arch/src/
+/deploy/arch/pkg/
+/deploy/arch/fork-keeper/
+/deploy/arch/*.pkg.tar.*

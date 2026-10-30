@@ -1,0 +1,5 @@
+# The config is readable by the service, not by other users. (The
+# directory stays root-owned and 0755, as packaged, so pacman doesn't warn
+# about changed ownership on upgrades.)
+z /etc/forkkeeper/config.yaml 0640 root forkkeeper -
+z /etc/forkkeeper/forkkeeper.env 0640 root forkkeeper -
