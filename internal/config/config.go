@@ -166,6 +166,8 @@ type Credentials struct {
 	Provider string `yaml:"provider"` // file | env | command
 	File     struct {
 		Dir string `yaml:"dir"`
+		// Prefix is prepended to credential names to get file names.
+		Prefix string `yaml:"prefix"`
 	} `yaml:"file"`
 	Env struct {
 		Prefix string `yaml:"prefix"`
@@ -327,6 +329,9 @@ func (c *Config) validate() error {
 		if c.Credentials.File.Dir == "" {
 			add("credentials.file.dir is required for the file provider")
 		}
+		if pre := c.Credentials.File.Prefix; pre != "" && !validCredentialPrefix.MatchString(pre) {
+			add("credentials.file.prefix %q: use letters, digits, '_', '.' and '-'", pre)
+		}
 	case "env":
 	case "command":
 		if len(c.Credentials.Command.Argv) == 0 {
@@ -441,6 +446,9 @@ func (c *Config) RepoFor(fullName string) (Repo, bool) {
 	}
 	return Repo{}, false
 }
+
+// validCredentialPrefix matches credential file name prefixes: no path separators.
+var validCredentialPrefix = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 var repoName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 

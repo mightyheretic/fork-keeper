@@ -1,0 +1,79 @@
+# Fork Keeper as a native systemd service (spec §6.4, §6.5).
+#
+# Secrets come from systemd's encrypted credential store, bound to the TPM2
+# where there is one: every /etc/credstore.encrypted/forkkeeper.<name> is
+# decrypted into $CREDENTIALS_DIRECTORY, readable by this service only.
+# Add one with: forkkeeperctl set-credential <name>
+#
+# Local settings go in /etc/forkkeeper/forkkeeper.env, or a drop-in
+# (systemctl edit forkkeeper), not in this file.
+
+[Unit]
+Description=Fork Keeper: syncs forks and locks down source before license changes
+Documentation=https://github.com/mightyheretic/fork-keeper
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/forkkeeper serve
+# Re-reads credential files; a changed credential in the store needs a
+# restart, since systemd only decrypts them at start.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10s
+# serve pings the watchdog while its database answers.
+WatchdogSec=3min
+TimeoutStartSec=2min
+TimeoutStopSec=30s
+
+User=forkkeeper
+Group=forkkeeper
+StateDirectory=forkkeeper
+StateDirectoryMode=0700
+UMask=0077
+
+Environment=FORKKEEPER_CONFIG=/etc/forkkeeper/config.yaml
+Environment=FORKKEEPER_DATA_DIR=/var/lib/forkkeeper
+Environment=FORKKEEPER_CREDENTIAL_PREFIX=forkkeeper.
+# Behind a reverse proxy on this host by default. The private API stays on
+# localhost (or set a Tailscale/WireGuard address); never 0.0.0.0.
+Environment=FORKKEEPER_WEBHOOK_ADDR=127.0.0.1:8080
+Environment=FORKKEEPER_API_ADDR=127.0.0.1:8081
+EnvironmentFile=-/etc/forkkeeper/forkkeeper.env
+ImportCredential=forkkeeper.*
+
+# Hardening. Fork Keeper only needs its state directory, outbound HTTPS and
+# its two listening ports; git runs as a child with hooks and filters off.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

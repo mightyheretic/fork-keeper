@@ -14,6 +14,10 @@ credentials:
     # /run/secrets in the container (Compose secrets), or systemd's
     # $CREDENTIALS_DIRECTORY when running natively.
     dir: ${CREDENTIALS_DIRECTORY:-/run/secrets}
+    # Prepended to each name to get the file name. forkkeeper.service sets
+    # it to "forkkeeper." to match its encrypted credential store
+    # (/etc/credstore.encrypted/forkkeeper.github_pat for github_pat).
+    prefix: ${FORKKEEPER_CREDENTIAL_PREFIX:-}
   # env:
   #   prefix: FORKKEEPER_CRED_   # github_webhook_secret -> FORKKEEPER_CRED_GITHUB_WEBHOOK_SECRET
   # command:                     # only useful outside the container (no tools in the image)

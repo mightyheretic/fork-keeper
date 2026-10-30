@@ -1,0 +1,2 @@
+# Unprivileged user for the forkkeeper service.
+u! forkkeeper - "Fork Keeper" /var/lib/forkkeeper

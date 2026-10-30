@@ -30,6 +30,11 @@ const approvalsUsage = `usage:
 
 // cliActor names the person running the CLI, for the audit log.
 func cliActor() string {
+	// forkkeeperctl runs commands as the service user; it passes on who
+	// actually ran them.
+	if a := os.Getenv("FORKKEEPER_ACTOR"); a != "" {
+		return "cli:" + a
+	}
 	if u, err := user.Current(); err == nil {
 		return "cli:" + u.Username
 	}

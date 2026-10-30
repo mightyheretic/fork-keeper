@@ -180,6 +180,7 @@ Webhook payloads and upstream repository contents are untrusted.
 - `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`
 - Restrict network egress to GitHub and the notification endpoint where possible
 - If containerized, pass credentials via a systemd service or Podman quadlet, never baked into the image
+- V1: `deploy/systemd/forkkeeper.service` (`Type=notify`, watchdog, `systemd-analyze security` 1.2), credentials imported from `/etc/credstore.encrypted/forkkeeper.*`, `forkkeeperctl` to run CLI commands in the same context, an Arch PKGBUILD and a Makefile. Egress isn't address-restricted (CDN addresses change); use a host firewall or proxy.
 
 ## 7. V2 Details
 

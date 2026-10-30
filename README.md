@@ -8,7 +8,7 @@ archiving it or notifying you.
 
 See [docs/spec.md](docs/spec.md) for the full specification.
 
-**Status:** V1 milestones 1–8 done.
+**Status:** V1 milestones 1–9 done.
 - **Watching:** the service polls upstream repos for new releases (or tags) and receives verified GitHub webhooks. Each new release is queued once in SQLite.
 - **License checks:** for each new release, it compares the licenses against the previous stable version.
 - **Rules:** your license rules decide what happens. A repo can be frozen at its last good version, and each version gets a merge policy for the merge engine.
@@ -18,6 +18,7 @@ See [docs/spec.md](docs/spec.md) for the full specification.
 - **Approvals:** a version that needs a human waits as an approval you resolve from the CLI or the PR. Every freeze, unfreeze, approval, override and rejection goes in an audit log.
 - **Notifications:** license warnings, approvals, reminders and sync problems go to ntfy, Gotify, email or a webhook.
 - **GitHub access:** it authenticates as a GitHub App or with a fine-grained PAT, using pluggable credential backends.
+- **Deployment:** a hardened systemd service with TPM2-encrypted credentials and an Arch package, or Docker Compose.
 
 ## Upstream polling
 
@@ -344,7 +345,7 @@ setting picks where they come from:
 
 | Provider | Reads | Notes |
 |---|---|---|
-| `file` (default) | `<dir>/<name>` | `/run/secrets` under Compose, `$CREDENTIALS_DIRECTORY` under systemd. Re-read on every use; warns if group/world-readable |
+| `file` (default) | `<dir>/<prefix><name>` | `/run/secrets` under Compose, `$CREDENTIALS_DIRECTORY` under systemd (prefix `forkkeeper.`). Re-read on every use; warns if group/world-readable |
 | `env` | `FORKKEEPER_CRED_<NAME>` | e.g. `github_webhook_secret` -> `FORKKEEPER_CRED_GITHUB_WEBHOOK_SECRET` |
 | `command` | stdout of `argv` | e.g. `[pass, show, "forkkeeper/{name}"]`, no shell. Cached until SIGHUP. Native installs only; the image has no tools |
 
@@ -356,12 +357,15 @@ to a profile; unmatched repos use `default`. See `config/forkkeeper.example.yaml
 On startup and every 24 hours, each profile is validated with one GitHub call. The results are
 logged: App permissions and webhook events, or the PAT's owner, scopes and expiry. You get a
 warning if anything required is missing, or if a token expires within 14 days. To reload
-credentials without a restart, send SIGHUP (`docker compose kill -s HUP forkkeeper`).
+credentials without a restart, send SIGHUP (`systemctl reload forkkeeper`, or
+`docker compose kill -s HUP forkkeeper`). Under systemd, a credential changed in the encrypted
+store needs `systemctl restart forkkeeper`, since systemd decrypts them only at start.
 
 Verify a setup before starting the service:
 
 ```sh
-docker compose run --rm forkkeeper check
+forkkeeperctl check                        # systemd install
+docker compose run --rm forkkeeper check   # Compose
 ```
 
 ## GitHub App setup
@@ -397,13 +401,75 @@ In the GitHub App (or repo webhook) settings:
 ```
 cmd/forkkeeper/        service and CLI (serve, status, approvals, sync, archive, ...)
 config/                example config; your real config.yaml is gitignored
+deploy/systemd/        systemd unit, sysusers/tmpfiles entries, env file, forkkeeperctl
+deploy/arch/           PKGBUILD for Arch Linux
 deploy/caddy/          reverse proxy: TLS, exposes only /webhooks/*
 docs/                  specification
 secrets/               mounted as /run/secrets; contents gitignored
 Dockerfile             multi-stage Go build -> Alpine + git, nonroot
 compose.yaml           production stack (forkkeeper + caddy)
 compose.dev.yaml       local dev override (no proxy, debug logs)
+Makefile               build, test, install (native systemd service)
 ```
+
+## Deployment (systemd, Arch Linux)
+
+The package installs the binary, `forkkeeper.service`, a `forkkeeper` system user and
+`forkkeeperctl`. Build it from this repo's `main` branch, or from a local checkout's
+committed state:
+
+```sh
+cd deploy/arch
+makepkg -si                                                  # from GitHub, branch main
+FORKKEEPER_SRC=$PWD/../.. FORKKEEPER_REF=main makepkg -si    # from this checkout
+```
+
+Elsewhere, `make && sudo make install` installs the same files (the config and env file only
+when missing), then run `sudo systemd-sysusers && sudo systemd-tmpfiles --create`.
+
+Then set it up:
+
+```sh
+sudoedit /etc/forkkeeper/config.yaml           # repos, GitHub auth, notifications
+sudoedit /etc/forkkeeper/forkkeeper.env        # listen addresses, GITHUB_APP_ID (not secrets)
+forkkeeperctl set-credential github_pat        # prompts; or pipe the value in
+forkkeeperctl set-credential github_webhook_secret
+forkkeeperctl check
+sudo systemctl enable --now forkkeeper
+journalctl -u forkkeeper -f
+```
+
+**Credentials.** `set-credential` encrypts each secret with `systemd-creds` into
+`/etc/credstore.encrypted/forkkeeper.<name>`, bound to the TPM2 and the host key when the machine
+has a TPM2. The service imports every `forkkeeper.*` credential, and systemd decrypts them at start
+into a private in-memory `$CREDENTIALS_DIRECTORY` only the service can read. Nothing on disk is
+plaintext. A TPM2-bound credential can't be decrypted on another machine, or after a motherboard
+or TPM replacement, so keep an offline copy of each secret (or be ready to issue new ones).
+
+**CLI.** Run commands through `forkkeeperctl` (`forkkeeperctl approvals`,
+`forkkeeperctl approve 3`, ...). It runs them through `sudo` as the `forkkeeper` user, with the
+service's environment, credentials and sandbox, and records your login in the audit log.
+
+**State** is in `/var/lib/forkkeeper` (database, git caches, backups), mode 0700. Back it up.
+
+**Lifecycle.** The service tells systemd when it's ready (`Type=notify`), so a port that's
+already in use fails the start. A watchdog restarts it if its database stops answering for 3
+minutes, and it restarts on failure. `systemctl reload forkkeeper` re-reads credential files.
+
+### Hardening (systemd)
+
+`systemd-analyze security forkkeeper` rates the unit 1.2 ("OK", the best band):
+
+- Dedicated locked system user, no capabilities, `NoNewPrivileges`
+- Read-only OS (`ProtectSystem=strict`); writable only `/var/lib/forkkeeper`; no `/home`,
+  private `/tmp` and `/dev`, hidden `/proc`
+- Kernel, clock, hostname, cgroup and namespace changes blocked; system calls limited to
+  `@system-service`; no writable-executable memory
+- Only IPv4, IPv6 and Unix sockets. Egress isn't limited by address: GitHub, mirrors and
+  notification services sit behind CDNs whose addresses change. Use a host firewall or an egress
+  proxy if you need that
+- Webhook receiver on `127.0.0.1:8080` for a reverse proxy on the same host; private API on
+  `127.0.0.1:8081`. Change them in `forkkeeper.env`; never put the API on a public address
 
 ## Deployment (Docker Compose)
 
@@ -422,7 +488,7 @@ docker compose up -d --build
 | 8080 | forkkeeper webhooks | Internal to the compose network, reached through Caddy |
 | 8081 | forkkeeper API | Host only, bound to `API_BIND` (default `127.0.0.1`). Set it to a Tailscale or WireGuard IP for remote use |
 
-### Hardening in place
+### Hardening (Compose)
 
 - Minimal Alpine image (the merge engine needs `git`), running as non-root uid 65532
 - Read-only root filesystem, all capabilities dropped, `no-new-privileges`
