@@ -312,6 +312,7 @@ notifications:
   approvals: true              # also notify approvals when the rule has no notify action
   remind_after: 72h            # remind about pending approvals; 0 turns it off
   sync_problems: true          # merge conflicts and CI failures on sync PRs
+  pull_requests: false         # sync PRs opened, updated, merged or closed
 ```
 
 | Message | When | Priority |
@@ -322,6 +323,8 @@ notifications:
 | License changed | Any other rule with `notify` | default |
 | Reminder | An approval still waiting after `remind_after` | default |
 | Sync problem | A merge conflict, or CI failing on an `auto` PR | default |
+| Sync PR opened or updated | With `pull_requests: true`, when no other message already links the PR | default |
+| Sync PR merged or closed | With `pull_requests: true` | low |
 
 - **Reliable:** messages go through an outbox in the database. A failed channel is retried with
   backoff for a day, and only that channel; a retried release doesn't notify twice.

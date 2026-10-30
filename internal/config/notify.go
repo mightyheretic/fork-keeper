@@ -28,6 +28,9 @@ type Notifications struct {
 	// SyncProblems notifies about merge conflicts and CI failures on sync
 	// PRs. Default true.
 	SyncProblems *bool `yaml:"sync_problems"`
+	// PullRequests notifies when a sync PR is opened, updated with a newer
+	// release, merged or closed. Default false.
+	PullRequests bool `yaml:"pull_requests"`
 }
 
 // Ntfy publishes to an ntfy topic (https://ntfy.sh or self-hosted).

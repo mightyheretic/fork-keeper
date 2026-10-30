@@ -337,3 +337,45 @@ func TestFreezeNotifiesUrgently(t *testing.T) {
 		t.Fatalf("notices = %+v", n.notices)
 	}
 }
+
+type prSyncer struct{ created bool }
+
+func (f *prSyncer) Sync(_ context.Context, req merge.Request) (merge.Result, error) {
+	pr := &provider.PullRequest{Number: 7, URL: "https://github.com/me/app/pull/7", State: "open"}
+	res := merge.Result{Sync: store.Sync{RefKey: store.RefKey{Provider: "github", Repo: "up/app", Ref: req.Ref},
+		Fork: "me/app", Status: store.SyncPROpen, MergePolicy: string(req.Decision.MergePolicy),
+		PRNumber: 7, PRURL: pr.URL}, PR: pr, PRCreated: !f.created}
+	f.created = true
+	return res, nil
+}
+
+func TestPRNotices(t *testing.T) {
+	ctx := context.Background()
+	p, _ := setupWith(t, fakeGate{
+		"v2": result("v1", []string{"MIT"}, []string{"MIT"}, "v2"),
+		"v3": result("v2", []string{"MIT"}, []string{"MIT"}, "v3"),
+		"v4": result("v3", []string{"MIT"}, []string{"BUSL-1.1"}, "v4"),
+	}, "me/app", &prSyncer{})
+	n := &fakeNotifier{}
+	p.Notify = n
+	for _, tag := range []string{"v2", "v3", "v4"} {
+		if _, err := p.Run(ctx, event(tag)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// v4 is frozen: its own message covers it, with no PR notice.
+	if len(n.notices) != 3 {
+		t.Fatalf("notices = %+v", n.notices)
+	}
+	opened, updated := n.notices[0].Message, n.notices[1].Message
+	if opened.Kind != notify.KindPR || !strings.Contains(opened.Title, "#7 opened") || opened.Click != "https://github.com/me/app/pull/7" ||
+		!strings.Contains(opened.Body, "merges it once CI passes") {
+		t.Fatalf("opened = %+v", opened)
+	}
+	if !strings.Contains(updated.Title, "#7 updated to v3") || n.notices[1].Key == n.notices[0].Key {
+		t.Fatalf("updated = %+v", n.notices[1])
+	}
+	if n.notices[2].Message.Kind != notify.KindLicense {
+		t.Fatalf("v4 = %+v", n.notices[2])
+	}
+}

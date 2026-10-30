@@ -83,6 +83,9 @@ type Result struct {
 	// PatchBranch holds the re-applied patch layer (patch-stack strategy).
 	PatchBranch string
 	PR          *provider.PullRequest
+	// PRCreated is true when this sync opened the PR, false when it
+	// updated one already open.
+	PRCreated bool
 	// Already is true when an earlier sync of this ref was reused.
 	Already bool
 }
