@@ -99,6 +99,7 @@ notifications:
   approvals: true      # notify approvals even when the rule has no notify action
   remind_after: 72h    # remind about pending approvals; 0 turns reminders off
   sync_problems: true  # merge conflicts, CI failures on sync PRs
+  pull_requests: false # sync PRs opened, updated, merged or closed
 
 # What to do when an upstream's licenses change between versions.
 # Rules run when the project's own (top-level) license changes: the declared

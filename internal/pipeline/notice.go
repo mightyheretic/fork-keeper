@@ -14,7 +14,8 @@ import (
 )
 
 // notify queues a message about the outcome: the rule's notify action, a
-// version that needs approval, or a merge conflict. Failing to queue is
+// version that needs approval, a merge conflict, or (when no other message
+// already links it) the sync PR that was opened or updated. Failing to queue is
 // logged, not returned: the work itself is done and must not be retried
 // for a message.
 func (p *Pipeline) notify(ctx context.Context, log *slog.Logger, ev provider.Event, decisionID int64, out *Outcome) {
@@ -31,6 +32,10 @@ func (p *Pipeline) notify(ctx context.Context, log *slog.Logger, ev provider.Eve
 			n.DecisionID = decisionID
 		}
 		notices = append(notices, n)
+	}
+	if s := out.Sync; s != nil && len(notices) == 0 && !s.Already && s.PR != nil {
+		notices = append(notices, notify.Notice{Key: fmt.Sprintf("pr:%s/%s#%d@%s", ev.Provider, s.Fork, s.PRNumber, ev.Tag),
+			Provider: ev.Provider, Message: prMessage(ev, out)})
 	}
 	if out.Sync != nil && out.Sync.Status == store.SyncConflict {
 		notices = append(notices, notify.Notice{Key: fmt.Sprintf("conflict:%s/%s@%s", ev.Provider, ev.Repo.FullName(), ev.Tag),
@@ -116,6 +121,34 @@ func DecisionMessage(ev provider.Event, out *Outcome) notify.Message {
 		m.Click = prURL
 		m.Links = append(m.Links, notify.Link{Label: "Open PR", URL: prURL})
 	}
+	if ev.URL != "" {
+		m.Links = append(m.Links, notify.Link{Label: "Release", URL: ev.URL})
+	}
+	return m
+}
+
+func prMessage(ev provider.Event, out *Outcome) notify.Message {
+	s := out.Sync
+	repo := ev.Repo.FullName()
+	verb := "opened"
+	if !s.PRCreated {
+		verb = "updated to " + ev.Tag
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Sync PR #%d on %s brings in upstream %s %s.", s.PRNumber, s.Fork, repo, ev.Tag)
+	if r := out.Check.Report; r != nil && r.Declared != "" {
+		fmt.Fprintf(&b, " License: %s.", r.Declared)
+	}
+	b.WriteString("\n\n")
+	switch rules.MergePolicy(s.MergePolicy) {
+	case rules.MergeAuto:
+		b.WriteString("Fork Keeper merges it once CI passes.")
+	default:
+		fmt.Fprintf(&b, "It's on hold (%s).", strings.ReplaceAll(s.MergePolicy, "_", " "))
+	}
+	m := notify.Message{Kind: notify.KindPR, Repo: repo, Ref: ev.Tag, Priority: notify.PriorityDefault,
+		Tags: []string{"arrows_counterclockwise"}, Title: fmt.Sprintf("%s %s: sync PR #%d %s", repo, ev.Tag, s.PRNumber, verb),
+		Body: b.String(), Click: s.PRURL, Links: []notify.Link{{Label: "Open PR", URL: s.PRURL}}}
 	if ev.URL != "" {
 		m.Links = append(m.Links, notify.Link{Label: "Release", URL: ev.URL})
 	}

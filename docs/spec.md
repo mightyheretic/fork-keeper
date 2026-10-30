@@ -104,6 +104,7 @@ The license gate compares the SPDX identifier, the LICENSE file and per-file hea
 - V1: resolve through the CLI (`approvals`, `approve`, `reject`) or on the PR: the `forkkeeper: approved` label, or merging it by hand.
 - V2: web UI.
 - Notification channels: ntfy, Gotify, email (TLS required), webhook. Messages go through an outbox with per-channel retry and dedupe. ntfy and Gotify messages link to the PR; approve-from-notification buttons wait for the V2 API, which needs authentication.
+- Optional (`pull_requests: true`): a notice when a sync PR is opened, updated with a newer release, merged or closed.
 
 ### 4.6 Audit Log
 

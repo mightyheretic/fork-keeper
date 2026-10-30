@@ -31,6 +31,7 @@ func (e *Engine) openPR(ctx context.Context, host provider.ForkHost, req Request
 		if pr, err = host.CreatePullRequest(ctx, req.Fork, in); err != nil {
 			return fmt.Errorf("open PR on %s: %w", req.Fork.FullName(), err)
 		}
+		res.PRCreated = true
 	} else if pr, err = host.UpdatePullRequest(ctx, req.Fork, pr.Number, in); err != nil {
 		return fmt.Errorf("update PR #%d on %s: %w", pr.Number, req.Fork.FullName(), err)
 	}

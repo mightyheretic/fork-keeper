@@ -131,9 +131,11 @@ func (r *Reconciler) check(ctx context.Context, s store.Sync) error {
 	switch {
 	case pr.Merged:
 		log.Info("sync PR merged")
+		r.notifyPR(ctx, log, s, pr, "merged", "Merged by hand.")
 		return setDetail(store.SyncMerged, "merged")
 	case pr.State != "open":
 		log.Info("sync PR closed without merging")
+		r.notifyPR(ctx, log, s, pr, "closed", "Closed without merging; the fork doesn't have this version.")
 		return setDetail(store.SyncClosed, "closed without merging")
 	}
 
@@ -184,7 +186,31 @@ func (r *Reconciler) check(ctx context.Context, s store.Sync) error {
 		detail = "auto-merged (no CI configured)"
 	}
 	log.Info("sync PR auto-merged", "checks", ci.Total)
+	r.notifyPR(ctx, log, s, pr, "merged", notify.Capitalize(detail)+".")
 	return setDetail(store.SyncMerged, detail)
+}
+
+// notifyPR tells about a sync PR that was merged or closed.
+func (r *Reconciler) notifyPR(ctx context.Context, log *slog.Logger, s store.Sync, pr *provider.PullRequest, verb, body string) {
+	if r.Notify == nil {
+		return
+	}
+	tag := "white_check_mark"
+	if verb != "merged" {
+		tag = "wastebasket"
+	}
+	_, err := r.Notify.Notify(ctx, notify.Notice{
+		Key:      fmt.Sprintf("pr-%s:%s/%s#%d@%s", verb, s.Provider, s.Fork, s.PRNumber, s.Ref),
+		Provider: s.Provider,
+		Message: notify.Message{Kind: notify.KindPR, Repo: s.Repo, Ref: s.Ref, Priority: notify.PriorityLow,
+			Tags:  []string{tag},
+			Title: fmt.Sprintf("%s %s: sync PR #%d %s", s.Repo, s.Ref, s.PRNumber, verb),
+			Body:  fmt.Sprintf("%s PR #%d (upstream %s %s): %s", s.Fork, s.PRNumber, s.Repo, s.Ref, body),
+			Click: pr.URL, Links: []notify.Link{{Label: "Open PR", URL: pr.URL}}},
+	})
+	if err != nil {
+		log.Warn("could not queue PR notification", "err", err)
+	}
 }
 
 func (r *Reconciler) notifyCI(ctx context.Context, log *slog.Logger, s store.Sync, pr *provider.PullRequest, ci provider.CIStatus) {

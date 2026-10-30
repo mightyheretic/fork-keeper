@@ -29,6 +29,8 @@ const (
 	KindReminder = "reminder"
 	// KindSync: a merge conflict or a CI failure on a sync PR.
 	KindSync = "sync"
+	// KindPR: a sync PR was opened, updated, merged or closed.
+	KindPR = "pr"
 	// KindTest: forkkeeper notify test.
 	KindTest = "test"
 )
@@ -156,6 +158,8 @@ func (q *Queue) Wants(kind string) bool {
 		return q.cfg.Reminders() > 0
 	case KindSync:
 		return q.cfg.NotifySyncProblems()
+	case KindPR:
+		return q.cfg.PullRequests
 	}
 	return true
 }

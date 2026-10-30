@@ -315,6 +315,9 @@ func TestQueueRespectsSettings(t *testing.T) {
 	if q.Wants(KindApproval) || q.Wants(KindReminder) || !q.Wants(KindLicense) || !q.Wants(KindSync) {
 		t.Fatal("wrong kinds wanted")
 	}
+	if q.Wants(KindPR) || !NewQueue(nil, config.Notifications{Ntfy: &config.Ntfy{}, PullRequests: true}).Wants(KindPR) {
+		t.Fatal("PR notices are opt-in")
+	}
 	if NewQueue(nil, config.Notifications{}).Wants(KindLicense) {
 		t.Fatal("no channels, but notices are queued")
 	}

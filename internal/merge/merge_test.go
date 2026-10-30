@@ -386,6 +386,8 @@ func TestNewerReleaseUpdatesPRAndKeepsApproval(t *testing.T) {
 	}
 
 	r := NewReconciler(map[string]provider.ForkHost{"github": e.host}, e.store, slog.New(slog.DiscardHandler))
+	notices := &fakeNotifier{}
+	r.Notify = notices
 	e.host.ci = provider.CIStatus{State: provider.CISuccess, Total: 1}
 	if err := r.Once(ctx); err != nil {
 		t.Fatal(err)
@@ -480,6 +482,10 @@ func TestReconcilerAutoMerge(t *testing.T) {
 	if s := status(); s.Status != store.SyncMerged || !slices.Equal(e.host.merged, []int{1}) {
 		t.Fatalf("after CI success: %+v merged=%v", s, e.host.merged)
 	}
+	if last := notices.n[len(notices.n)-1]; last.Message.Kind != notify.KindPR || !strings.Contains(last.Message.Title, "#1 merged") ||
+		!strings.Contains(last.Message.Body, "Auto-merged after CI passed") {
+		t.Fatalf("merge notice = %+v", last)
+	}
 }
 
 type fakeNotifier struct{ n []notify.Notice }
@@ -496,6 +502,8 @@ func TestReconcilerNoticesManualMergeAndClose(t *testing.T) {
 	res := e.sync("v2", "v1", rules.MergeApproval, "")
 	ctx := context.Background()
 	r := NewReconciler(map[string]provider.ForkHost{"github": e.host}, e.store, slog.New(slog.DiscardHandler))
+	notices := &fakeNotifier{}
+	r.Notify = notices
 	e.host.ci = provider.CIStatus{State: provider.CISuccess, Total: 1}
 	if err := r.Once(ctx); err != nil || len(e.host.merged) != 0 {
 		t.Fatalf("approval PR must not be auto-merged: %v %v", err, e.host.merged)
@@ -506,5 +514,12 @@ func TestReconcilerNoticesManualMergeAndClose(t *testing.T) {
 	}
 	if s, _, _ := e.store.SyncFor(ctx, res.RefKey); s.Status != store.SyncClosed {
 		t.Fatalf("status = %s", s.Status)
+	}
+	if len(notices.n) != 1 || !strings.Contains(notices.n[0].Message.Title, "#1 closed") {
+		t.Fatalf("close notices = %+v", notices.n)
+	}
+	// Closed PRs aren't checked again, so there's no second notice.
+	if err := r.Once(ctx); err != nil || len(notices.n) != 1 {
+		t.Fatalf("second round: %v %+v", err, notices.n)
 	}
 }
