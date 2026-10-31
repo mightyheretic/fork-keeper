@@ -210,8 +210,11 @@ func approveCmd(args []string, approve bool) int {
 		return 1
 	}
 	fmt.Printf("Approval #%d (%s %s): %s by %s.\n", a.ID, a.Repo, a.Ref, a.Status, a.ResolvedBy)
-	if res.Detail != "" {
-		fmt.Println(notify.Capitalize(res.Detail) + ".")
+	if d := notify.Capitalize(res.Detail); d != "" {
+		if !strings.HasSuffix(d, ".") {
+			d += "."
+		}
+		fmt.Println(d)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "The decision is recorded, but updating the fork failed: %v\n", err)

@@ -15,6 +15,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/git"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
+	"github.com/mightyheretic/fork-keeper/internal/releasefiles"
 	"github.com/mightyheretic/fork-keeper/internal/store"
 	"github.com/mightyheretic/fork-keeper/internal/swh"
 )
@@ -306,5 +307,42 @@ func TestPushFailureIsRecordedNotFatal(t *testing.T) {
 	pushes, _ := e.st.ArchivePushes(context.Background(), "up/app")
 	if len(pushes) != 2 {
 		t.Fatalf("recorded pushes: %+v", pushes)
+	}
+}
+
+type fakeCopier struct{ reqs []releasefiles.Request }
+
+func (f *fakeCopier) Copy(_ context.Context, req releasefiles.Request) (releasefiles.Result, error) {
+	f.reqs = append(f.reqs, req)
+	return releasefiles.Result{Tag: req.Tag, Uploaded: []string{"app.exe"}}, nil
+}
+
+func TestBackupCopiesReleaseFiles(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	c1 := commit(t, e.up, "a.txt", "1")
+	sh(t, e.up, "tag", "v1.0.0")
+	copier := &fakeCopier{}
+	e.a.Files = copier
+
+	req := e.req
+	req.Tags = []string{"v1.0.0"}
+	if _, err := e.a.Backup(ctx, req); err != nil || len(copier.reqs) != 0 {
+		t.Fatalf("release_files off: %v %+v", err, copier.reqs)
+	}
+	req.Settings.ReleaseFiles = true
+	req.LastGood = "v1.0.0" // the same tag twice is copied once
+	res, err := e.a.Backup(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copier.reqs) != 1 || copier.reqs[0].Commit != c1 || copier.reqs[0].Fork.FullName() != "me/app" ||
+		copier.reqs[0].Public || len(res.Files) != 1 {
+		t.Fatalf("copies = %+v, files = %+v", copier.reqs, res.Files)
+	}
+	req.Fork = ""
+	copier.reqs = nil
+	if _, err := e.a.Backup(ctx, req); err != nil || len(copier.reqs) != 0 {
+		t.Fatalf("no fork: %v %+v", err, copier.reqs)
 	}
 }

@@ -1,5 +1,6 @@
 // Package archive keeps source backups of upstream releases: git history
-// and tags, never release assets. Each upstream has a bare repository under
+// and tags. Release files are copied to the fork by the releasefiles
+// package, never kept here. Each upstream has a bare repository under
 // <data_dir>/archive that only ever gains refs: a tag that upstream later
 // moves or deletes keeps its original commit here. Backed-up refs are then
 // pushed to the fork and any mirrors, and Software Heritage is asked to
@@ -23,6 +24,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 	"github.com/mightyheretic/fork-keeper/internal/git"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
+	"github.com/mightyheretic/fork-keeper/internal/releasefiles"
 	"github.com/mightyheretic/fork-keeper/internal/store"
 	"github.com/mightyheretic/fork-keeper/internal/swh"
 )
@@ -59,8 +61,16 @@ type Saver interface {
 	Save(ctx context.Context, originURL string) (swh.SaveRequest, error)
 }
 
+// FileCopier copies an upstream release's files to the fork.
+type FileCopier interface {
+	Copy(ctx context.Context, req releasefiles.Request) (releasefiles.Result, error)
+}
+
 // Archiver makes and distributes backups.
 type Archiver struct {
+	// Files copies release files when the settings ask for it; nil
+	// disables that.
+	Files FileCopier
 	hosts map[string]provider.GitRemote // by provider name
 	store Store
 	git   *git.Runner
@@ -115,6 +125,8 @@ type Result struct {
 	SWH *swh.SaveRequest
 	// SWHNote says why no request was made, or why it failed.
 	SWHNote string
+	// Files has one entry per release whose files were copied to the fork.
+	Files []releasefiles.Result
 }
 
 // Push is the outcome of pushing backups to one destination.
@@ -194,7 +206,36 @@ func (a *Archiver) Backup(ctx context.Context, req Request) (Result, error) {
 
 	res.Pushes = a.pushAll(ctx, dir, req)
 	a.softwareHeritage(ctx, host, req, &res)
+	a.copyFiles(ctx, req, tags, commits, &res)
 	return res, nil
+}
+
+// copyFiles copies the release files of each backed-up tag to the fork.
+// Failures are recorded, not returned: the source backup itself is done,
+// and the next backup of the tag retries the files.
+func (a *Archiver) copyFiles(ctx context.Context, req Request, tags []string, commits map[string]string, res *Result) {
+	if a.Files == nil || !req.Settings.ReleaseFiles || req.Fork == "" {
+		return
+	}
+	fork, err := provider.ParseRepo(req.Fork)
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, t := range tags {
+		c, ok := commits[t]
+		if !ok || seen[t] {
+			continue
+		}
+		seen[t] = true
+		r, err := a.Files.Copy(ctx, releasefiles.Request{Provider: req.Provider, Upstream: req.Upstream, Fork: fork,
+			Tag: t, Commit: c, Public: req.Settings.ReleaseFilesPublic})
+		if err != nil {
+			r.Note = err.Error()
+			a.log.Warn("could not copy release files", "repo", req.Upstream.FullName(), "tag", t, "err", err)
+		}
+		res.Files = append(res.Files, r)
+	}
 }
 
 func (a *Archiver) initRepo(ctx context.Context, dir string) error {

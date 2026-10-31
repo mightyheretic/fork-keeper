@@ -13,7 +13,7 @@ See [docs/spec.md](docs/spec.md) for the full specification.
 - **License checks:** for each new release, it compares the licenses against the previous stable version.
 - **Rules:** your license rules decide what happens. A repo can be frozen at its last good version, and each version gets a merge policy for the merge engine.
 - **Merging:** each new release is merged into your fork on a staging branch, keeping history, and a PR is opened. `auto` PRs are merged once CI passes; anything else waits for you.
-- **Backups:** the source of each minor release (git history and tags, no release assets) is kept locally, pushed to your fork and mirrors, and Software Heritage is asked to archive the upstream.
+- **Backups:** the source of each minor release (git history and tags) is kept locally, pushed to your fork and mirrors, and Software Heritage is asked to archive the upstream. Optionally, its Windows and Linux builds are copied to a release on your fork.
 - **Early warning:** each upstream's default branch is checked between releases, so a relicense is caught before it ships and the last commit before it is backed up.
 - **Approvals:** a version that needs a human waits as an approval you resolve from the CLI or the PR. Every freeze, unfreeze, approval, override and rejection goes in an audit log.
 - **Notifications:** license warnings, approvals, reminders and sync problems go to ntfy, Gotify, email or a webhook.
@@ -203,7 +203,8 @@ forkkeeper sync junegunn/fzf v0.74.5             # what the service does for a n
 ## Source backups
 
 Releases are the backup points: Fork Keeper keeps the source of upstream releases, as git
-history and tags. It never downloads release assets or binaries.
+history and tags. With `release_files` on, it also copies their Windows and Linux builds to the
+fork (see [Release files](#release-files)).
 
 ```yaml
 archive:
@@ -211,6 +212,8 @@ archive:
   push_to_fork: true         # copy backups to the repo's fork (default)
   software_heritage: true    # ask Software Heritage to archive the upstream (default)
   # software_heritage_token: swh_token   # optional credential, for higher rate limits
+  release_files: false       # copy Windows and Linux builds to a release on the fork
+  release_files_public: false  # publish those releases (default: drafts only you can see)
   mirrors:                   # optional extra copies, e.g. on another host
     - url: https://codeberg.org/you/{name}.git   # {owner} and {name} are filled in
       token: codeberg_token  # credential name
@@ -231,7 +234,7 @@ archive:
   `git fetch <fork> 'refs/forkkeeper/archive/*:refs/forkkeeper/archive/*'`.
 - **Software Heritage:** asked at most once a day per upstream, and always on a license change.
 - **Repo overrides:** each repo can set its own `archive:` (`releases`, `push_to_fork`,
-  `software_heritage`, and extra `mirrors`).
+  `software_heritage`, `release_files`, `release_files_public`, and extra `mirrors`).
 
 Back up past releases, or list what is backed up:
 
@@ -239,8 +242,35 @@ Back up past releases, or list what is backed up:
 forkkeeper archive --dry-run morluto/rea     # tags the policy would back up
 forkkeeper archive morluto/rea               # back them up now
 forkkeeper archive morluto/rea v1.2.3        # specific tags
-forkkeeper archive list [owner/repo]         # backups, pushes, Software Heritage requests
+forkkeeper archive list [owner/repo]         # backups, pushes, release files, Software Heritage
 ```
+
+### Release files
+
+With `archive.release_files: true`, each backed-up release's builds are copied to a release of the
+same tag on the fork, so they stay downloadable if upstream deletes them or changes its license.
+The repo needs a `fork`, and the token needs Contents write access to it (already required for
+syncing).
+
+| Platform | What is kept |
+|---|---|
+| Windows x64 and ARM64 | Installers and archives (`.exe`, `.msi`, `.msix`, `.zip`, ...) |
+| Linux x86_64 and aarch64 | For each CPU, only the best kind the release has: Arch packages (`.pkg.tar.zst`, `.pkg.tar.xz`, or names with `archlinux`); if none, AppImage and Flatpak bundles; if none of those, generic Linux tarballs, zips and binaries |
+
+- **Never kept:** `.deb`, `.rpm`, `.snap` and other distro packages, macOS and other systems,
+  32-bit and other CPUs, debug symbols. A file that names no CPU is taken as x86_64; an Arch
+  `any` package fits both CPUs.
+- **Checksums and signatures** (`file.sha256`, `file.sig`, `SHA256SUMS`, ...) come along with the
+  files they belong to.
+- **Nothing is kept locally.** Each file is downloaded to a temporary file under
+  `<data_dir>/tmp`, uploaded, checked on the fork (size and SHA-256), and deleted straight away.
+  A bad upload is removed from the fork. `archive list` shows each file's SHA-256.
+- **Drafts by default.** The fork's release stays a draft, visible only to people with write
+  access, and adds no tag to the fork. `release_files_public: true` publishes it instead, tagging
+  the release's commit on the fork.
+- **Limits:** GitHub allows 2 GiB per file; larger files are skipped and reported. Files already
+  on the fork's release are left alone. A failed file is retried by the next backup of that
+  release, or by hand with `forkkeeper archive owner/repo <tag>`.
 
 ## Default-branch early warning
 
