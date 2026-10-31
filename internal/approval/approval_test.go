@@ -112,7 +112,7 @@ func TestApproveMakesPRMergeable(t *testing.T) {
 		t.Fatalf("PR = %+v, comments %v", e.host.pr, e.host.comments)
 	}
 	open, _, _ := e.st.OpenSyncFor(ctx, "github", "up/app")
-	if open.MergePolicy != string(rules.MergeAuto) || !strings.Contains(res.Detail, "ready") {
+	if open.MergePolicy != string(rules.MergeAuto) || !strings.Contains(res.Detail, "is ready for review. Fork Keeper merges it once CI passes.") {
 		t.Fatalf("sync = %+v, detail %q", open, res.Detail)
 	}
 	if got, _, _ := e.st.Approval(ctx, a.ID); !got.Applied {

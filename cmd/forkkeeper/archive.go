@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/notify"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
+	"github.com/mightyheretic/fork-keeper/internal/releasefiles"
 	"github.com/mightyheretic/fork-keeper/internal/store"
 )
 
@@ -26,9 +28,11 @@ const archiveUsage = `usage:
   forkkeeper archive [--releases policy] [--dry-run] <owner/upstream> [tag...]
   forkkeeper archive list [owner/upstream]
 
-Backs up the source (git history and tags, no release assets) of an
-upstream's releases into <data_dir>/archive, then pushes the backups to the
-fork and mirrors and asks Software Heritage to archive the upstream.
+Backs up the source (git history and tags) of an upstream's releases into
+<data_dir>/archive, then pushes the backups to the fork and mirrors and asks
+Software Heritage to archive the upstream. With archive.release_files on,
+each release's Windows and Linux files are copied to a release on the fork
+(nothing is kept locally); running it again retries files that failed.
 
 With tags, backs up those tags. Without, backs up every upstream tag the
 archive policy wants (archive.releases, or --releases major|minor|all):
@@ -36,7 +40,8 @@ use it once to back up a repo's past releases.
 
   --dry-run  list the tags that would be backed up; fetch nothing
 
-"list" shows what is backed up and where it was pushed.`
+"list" shows what is backed up, where it was pushed and which release
+files were copied.`
 
 // archiveCmd backs up releases by hand, or lists backups.
 func archiveCmd(args []string) int {
@@ -114,8 +119,15 @@ func archiveCmd(args []string) int {
 		}
 	}
 	if *dryRun {
+		var releases provider.ReleaseHost
+		if settings.ReleaseFiles && repoCfg.Fork != "" {
+			releases = github.NewReleaseFiles(cfg.GitHub.APIURL, repoToken(cfg, auth), nil)
+		}
 		for _, t := range tags {
 			fmt.Println("  " + t)
+			if releases != nil {
+				printReleaseFiles(ctx, releases, upstream, t)
+			}
 		}
 		return 0
 	}
@@ -129,10 +141,8 @@ func archiveCmd(args []string) int {
 		return 1
 	}
 	writeBackup(os.Stdout, res, archiver.Dir(github.Name, upstream))
-	for _, p := range res.Pushes {
-		if p.Err != nil {
-			return 1
-		}
+	if backupFailed(res) {
+		return 1
 	}
 	return 0
 }
@@ -157,6 +167,69 @@ func writeBackup(w io.Writer, r archive.Result, dir string) {
 	case r.SWHNote != "":
 		fmt.Fprintf(w, "Software Heritage: %s\n", r.SWHNote)
 	}
+	for _, f := range r.Files {
+		switch {
+		case f.Note != "":
+			fmt.Fprintf(w, "Release files %s: %s\n", f.Tag, f.Note)
+		default:
+			fmt.Fprintf(w, "Release files %s: %d copied, %d already on the fork, %d failed (%s)\n",
+				f.Tag, len(f.Uploaded), len(f.Existing), len(f.Failed), f.ReleaseURL)
+			for _, e := range f.Failed {
+				fmt.Fprintf(w, "  %s: FAILED: %v\n", e.Name, e.Err)
+			}
+		}
+	}
+}
+
+// printReleaseFiles lists the files of tag's release that would be copied.
+func printReleaseFiles(ctx context.Context, h provider.ReleaseHost, upstream provider.Repo, tag string) {
+	rel, err := h.UpstreamRelease(ctx, upstream, tag)
+	switch {
+	case errors.Is(err, provider.ErrRefNotFound):
+		fmt.Println("      no release for this tag")
+		return
+	case err != nil:
+		fmt.Println("      release files: " + err.Error())
+		return
+	}
+	sel := releasefiles.Select(rel.Assets)
+	if len(sel) == 0 {
+		fmt.Printf("      no Windows or Linux files (%d files in the release)\n", len(rel.Assets))
+		return
+	}
+	kept := map[int64]bool{}
+	for _, f := range sel {
+		kept[f.ID] = true
+		kind := f.Platform
+		if f.Tier != "" {
+			kind += ", " + f.Tier
+		}
+		fmt.Printf("      %s (%s, %s)\n", f.Name, kind, humanSize(f.Size))
+	}
+	var skipped []string
+	for _, a := range rel.Assets {
+		if !kept[a.ID] {
+			skipped = append(skipped, a.Name)
+		}
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("      skipped: %s\n", strings.Join(skipped, ", "))
+	}
+}
+
+// backupFailed reports whether any push or release file failed.
+func backupFailed(r archive.Result) bool {
+	for _, p := range r.Pushes {
+		if p.Err != nil {
+			return true
+		}
+	}
+	for _, f := range r.Files {
+		if len(f.Failed) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func listOrNone(s []string) string {
@@ -217,6 +290,25 @@ func archiveListCmd(args []string) int {
 				result = "failed: " + p.Error
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", p.Repo, p.Destination, p.PushedAt.Local().Format("2006-01-02 15:04"), p.Refs, result)
+		}
+		tw.Flush()
+	}
+	files, err := db.ReleaseFiles(ctx, "", repo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if len(files) > 0 {
+		fmt.Println()
+		tw = tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "REPO\tVERSION\tFILE\tPLATFORM\tSIZE\tSHA-256\tSTATUS")
+		for _, f := range files {
+			status := f.Status
+			if f.Error != "" {
+				status += ": " + f.Error
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", f.Repo, f.Tag, f.Name, f.Platform, humanSize(f.Size),
+				orDash(shortSHA(f.SHA256)), status)
 		}
 		tw.Flush()
 	}
@@ -342,4 +434,16 @@ func mainCmd(args []string) int {
 		}
 	}
 	return code
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }

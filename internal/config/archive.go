@@ -8,8 +8,8 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/credentials"
 )
 
-// Archive configures source backups of upstream releases. Backups hold git
-// history and tags only, never release assets.
+// Archive configures backups of upstream releases: their source (git
+// history and tags) and, optionally, their Windows and Linux files.
 type Archive struct {
 	// Releases picks which upstream releases are backed up: major, minor
 	// (default), all or none. The last version before a license change is
@@ -29,14 +29,23 @@ type Archive struct {
 	// SoftwareHeritageURL is the API base. Default
 	// https://archive.softwareheritage.org/api/1.
 	SoftwareHeritageURL string `yaml:"software_heritage_url"`
+	// ReleaseFiles copies each backed-up release's Windows (x64, ARM64)
+	// and Linux (x86_64, aarch64) files to a release of the same tag on
+	// the fork. Default false.
+	ReleaseFiles *bool `yaml:"release_files"`
+	// ReleaseFilesPublic publishes those fork releases; by default they
+	// stay drafts, visible only to people with write access to the fork.
+	ReleaseFilesPublic *bool `yaml:"release_files_public"`
 }
 
 // RepoArchive overrides Archive for one repo.
 type RepoArchive struct {
-	Releases         string   `yaml:"releases"`
-	PushToFork       *bool    `yaml:"push_to_fork"`
-	Mirrors          []Mirror `yaml:"mirrors"`
-	SoftwareHeritage *bool    `yaml:"software_heritage"`
+	Releases           string   `yaml:"releases"`
+	PushToFork         *bool    `yaml:"push_to_fork"`
+	Mirrors            []Mirror `yaml:"mirrors"`
+	SoftwareHeritage   *bool    `yaml:"software_heritage"`
+	ReleaseFiles       *bool    `yaml:"release_files"`
+	ReleaseFilesPublic *bool    `yaml:"release_files_public"`
 }
 
 // Mirror is a git remote that receives backups.
@@ -148,16 +157,21 @@ type ArchiveSettings struct {
 	PushToFork       bool
 	Mirrors          []Mirror
 	SoftwareHeritage bool
+	// ReleaseFiles copies release files to the fork (it needs a fork).
+	ReleaseFiles       bool
+	ReleaseFilesPublic bool
 }
 
 // ArchiveFor returns r's archive settings: its overrides on top of the
 // top-level ones, with mirror URLs filled in.
 func (c *Config) ArchiveFor(r Repo) ArchiveSettings {
 	s := ArchiveSettings{
-		Releases:         c.Archive.Releases,
-		PushToFork:       c.Archive.PushToFork == nil || *c.Archive.PushToFork,
-		SoftwareHeritage: c.Archive.SoftwareHeritage == nil || *c.Archive.SoftwareHeritage,
-		Mirrors:          c.MirrorsFor(r),
+		Releases:           c.Archive.Releases,
+		PushToFork:         c.Archive.PushToFork == nil || *c.Archive.PushToFork,
+		SoftwareHeritage:   c.Archive.SoftwareHeritage == nil || *c.Archive.SoftwareHeritage,
+		Mirrors:            c.MirrorsFor(r),
+		ReleaseFiles:       c.Archive.ReleaseFiles != nil && *c.Archive.ReleaseFiles,
+		ReleaseFilesPublic: c.Archive.ReleaseFilesPublic != nil && *c.Archive.ReleaseFilesPublic,
 	}
 	if r.Archive.Releases != "" {
 		s.Releases = r.Archive.Releases
@@ -167,6 +181,12 @@ func (c *Config) ArchiveFor(r Repo) ArchiveSettings {
 	}
 	if r.Archive.SoftwareHeritage != nil {
 		s.SoftwareHeritage = *r.Archive.SoftwareHeritage
+	}
+	if r.Archive.ReleaseFiles != nil {
+		s.ReleaseFiles = *r.Archive.ReleaseFiles
+	}
+	if r.Archive.ReleaseFilesPublic != nil {
+		s.ReleaseFilesPublic = *r.Archive.ReleaseFilesPublic
 	}
 	return s
 }

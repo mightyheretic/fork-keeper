@@ -258,7 +258,7 @@ func (s *Service) apply(ctx context.Context, a store.Approval) (string, error) {
 	if err := s.store.SetSyncPolicy(ctx, open.ID, string(rules.MergeAuto), "approved by "+a.ResolvedBy); err != nil {
 		return "", err
 	}
-	return done(fmt.Sprintf("PR #%d on %s is ready: %s", open.PRNumber, open.Fork, strings.ToLower(next[:1])+next[1:]))
+	return done(fmt.Sprintf("PR #%d on %s is ready for review. %s", open.PRNumber, open.Fork, next))
 }
 
 func (s *Service) host(sync store.Sync) (provider.ForkHost, provider.Repo, error) {

@@ -27,6 +27,7 @@ import (
 	"github.com/mightyheretic/fork-keeper/internal/pipeline"
 	"github.com/mightyheretic/fork-keeper/internal/provider"
 	"github.com/mightyheretic/fork-keeper/internal/provider/github"
+	"github.com/mightyheretic/fork-keeper/internal/releasefiles"
 	"github.com/mightyheretic/fork-keeper/internal/rules"
 	"github.com/mightyheretic/fork-keeper/internal/sdnotify"
 	"github.com/mightyheretic/fork-keeper/internal/store"
@@ -284,8 +285,9 @@ func watchKind(r config.Repo) provider.EventKind {
 }
 
 // newArchiver returns the source backup archiver. Backups live under
-// <data_dir>/archive.
-func newArchiver(cfg *config.Config, auth *github.Auth, creds credentials.Provider, st archive.Store, log *slog.Logger) (*archive.Archiver, error) {
+// <data_dir>/archive; release files pass through <data_dir>/tmp on their
+// way to the fork.
+func newArchiver(cfg *config.Config, auth *github.Auth, creds credentials.Provider, st *store.Store, log *slog.Logger) (*archive.Archiver, error) {
 	runner, err := newGitRunner(cfg)
 	if err != nil {
 		return nil, err
@@ -296,7 +298,10 @@ func newArchiver(cfg *config.Config, auth *github.Auth, creds credentials.Provid
 		token = func(ctx context.Context) (credentials.Secret, error) { return creds.Get(ctx, name) }
 	}
 	saver := swh.New(cfg.Archive.SoftwareHeritageURL, token, nil)
-	return archive.New(hosts, st, runner, filepath.Join(cfg.DataDir, "archive"), creds, saver, log), nil
+	a := archive.New(hosts, st, runner, filepath.Join(cfg.DataDir, "archive"), creds, saver, log)
+	releases := map[string]provider.ReleaseHost{github.Name: github.NewReleaseFiles(cfg.GitHub.APIURL, repoToken(cfg, auth), nil)}
+	a.Files = releasefiles.New(releases, st, filepath.Join(cfg.DataDir, "tmp"), log.With("component", "releasefiles"))
+	return a, nil
 }
 
 // mainTargets lists the upstreams whose default branch is watched.

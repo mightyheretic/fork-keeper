@@ -88,7 +88,7 @@ The license gate compares the SPDX identifier, the LICENSE file and per-file hea
 
 ### 4.4 Archival Backup
 
-- Back up the source of upstream releases: git history and tags only, never release assets or binaries. Releases, not commits on the default branch, are the sync and backup points. Policy per repo: `major` (X.0.0, and 0.Y.0 before 1.0), `minor` (X.Y.0, default), `all` or `none`; pre-releases never.
+- Back up the source of upstream releases: git history and tags. Optionally (`release_files`), copy each backed-up release's Windows x64/ARM64 and Linux x86_64/aarch64 builds to a release of the same tag on the fork (a draft by default). For Linux, per CPU, only the best tier available: Arch packages, else AppImage/Flatpak bundles, else generic Linux builds; never .deb/.rpm/.snap. Files are only staged locally until the upload is verified (size, SHA-256), then deleted. Releases, not commits on the default branch, are the sync and backup points. Policy per repo: `major` (X.0.0, and 0.Y.0 before 1.0), `minor` (X.Y.0, default), `all` or `none`; pre-releases never.
 - The local archive (a bare repository per upstream) only gains refs: a tag upstream later moves or deletes keeps its original commit.
 - Copies: every backed-up ref is pushed to the fork and to any mirrors (another provider), under hidden `refs/forkkeeper/archive/` refs by default so they never trigger CI; a dedicated backup repo can take plain tags. Software Heritage is asked to archive the upstream (at most daily, always on a license change).
 - On a license change (a freeze, or the `archive` rule action) the version before it is backed up as `forkkeeper/last-good`, whatever the policy.

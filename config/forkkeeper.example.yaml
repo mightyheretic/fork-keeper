@@ -66,14 +66,18 @@ merge:
   committer_name: Fork Keeper
   committer_email: forkkeeper@localhost
 
-# Source backups of upstream releases: git history and tags, never release
-# assets. Kept under <data_dir>/archive; tags are only ever added, so a tag
-# upstream moves or deletes keeps its original commit.
+# Backups of upstream releases. Source (git history and tags) is kept under
+# <data_dir>/archive; tags are only ever added, so a tag upstream moves or
+# deletes keeps its original commit. Release files go to the fork only.
 archive:
   releases: minor          # major (X.0.0) | minor (X.Y.0) | all | none
   push_to_fork: true       # copy backups to the fork, under hidden refs/forkkeeper/archive/
   software_heritage: true  # ask Software Heritage to archive the upstream (at most daily)
   # software_heritage_token: swh_token   # optional credential name
+  # Copy Windows (x64, ARM64) and Linux (x86_64, aarch64) builds to a release
+  # on the fork. Linux: Arch packages, else AppImage/Flatpak, else generic.
+  release_files: false
+  release_files_public: false   # default: the fork's release stays a draft
   mirrors: []
   # mirrors:
   #   - url: https://codeberg.org/your-user/{name}.git   # {owner}, {name} filled in

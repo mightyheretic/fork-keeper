@@ -239,6 +239,55 @@ type GitRemote interface {
 	GitAuth(ctx context.Context, repo Repo) (credentials.Secret, error)
 }
 
+// Release is a published (or, on a fork, draft) release and its files.
+type Release struct {
+	ID      int64
+	TagName string
+	Draft   bool
+	URL     string
+	// UploadURL is where files are uploaded (provider-specific).
+	UploadURL string
+	Assets    []ReleaseAsset
+}
+
+// ReleaseAsset is one file attached to a release.
+type ReleaseAsset struct {
+	ID          int64
+	Name        string
+	Size        int64
+	ContentType string
+	// Digest is "sha256:<hex>" when the provider reports one.
+	Digest string
+}
+
+// ReleaseInput creates a release.
+type ReleaseInput struct {
+	TagName string
+	// Commit is where the tag is created if it doesn't exist yet. Only used
+	// when the release is published.
+	Commit string
+	Name   string
+	Body   string
+	Draft  bool
+}
+
+// ReleaseHost reads upstream release files and keeps copies on a fork's
+// releases.
+type ReleaseHost interface {
+	// UpstreamRelease returns the published release for tag, or
+	// ErrRefNotFound when tag has none.
+	UpstreamRelease(ctx context.Context, repo Repo, tag string) (*Release, error)
+	// DownloadAsset streams a release file. The caller closes it.
+	DownloadAsset(ctx context.Context, repo Repo, id int64) (io.ReadCloser, error)
+	// ForkRelease returns repo's release for tag, drafts included, or nil.
+	ForkRelease(ctx context.Context, repo Repo, tag string) (*Release, error)
+	CreateRelease(ctx context.Context, repo Repo, in ReleaseInput) (*Release, error)
+	// UploadAsset attaches size bytes from body to rel as name.
+	UploadAsset(ctx context.Context, repo Repo, rel *Release, name, contentType string, size int64, body io.Reader) (ReleaseAsset, error)
+	GetAsset(ctx context.Context, repo Repo, id int64) (ReleaseAsset, error)
+	DeleteAsset(ctx context.Context, repo Repo, id int64) error
+}
+
 // PullRequest is an open or closed pull (merge) request.
 type PullRequest struct {
 	Number  int
